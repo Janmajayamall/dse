@@ -1,10 +1,12 @@
 use async_std::io;
+use async_std::prelude::StreamExt;
+use futures::{select, StreamExt};
 use libp2p::core::transport::Boxed;
 use libp2p::futures::stream::Peek;
 use libp2p::kad::{GetProvidersOk, Kademlia, KademliaEvent, QueryId, QueryResult, KademliaConfig, KadConnectionType};
 use libp2p::kad::record::store::MemoryStore;
 use libp2p::{NetworkBehaviour, PeerId};
-use libp2p::swarm::{NetworkBehaviour, NetworkBehaviourEventProcess};
+use libp2p::swarm::{NetworkBehaviour, NetworkBehaviourEventProcess, SwarmBuilder};
 use libp2p::identity::{Keypair};
 use libp2p::dns::TokioDnsConfig;
 use libp2p::tcp::TokioTcpConfig;
@@ -51,7 +53,8 @@ impl Behaviour {
     }    
 }
 
-pub fn build_transport(identity_keypair: &Keypair) -> io::Result<Boxed<PeerId, StreamMuxerBox>>{
+// Uses TCP encrypted using noise DH and MPlex for multiplexing
+pub fn build_transport(identity_keypair: &Keypair) -> io::Result<Boxed<(PeerId, StreamMuxerBox)>>{
     // noise config
     let keypair = noise::Keypair::<noise::X25519>::new().into_authentic(identity_keypair).unwrap();
     let noise_config = noise::NoiseConfig::xx(keypair).into_authenticated();
@@ -77,15 +80,31 @@ async fn main() -> Result<(), Box<dyn error::Error>> {
     let keypair = Keypair::generate_secp256k1();
     let peer_id = keypair.public().to_peer_id();
 
-    // connect
-
-
-    // build transport
+    // connect    
 
 
     // Build swarm
-    // let transport = transport::
+    let transport = build_transport(&keypair)?;
+    let behaviour = Behaviour::new(peer_id).await;
+    let mut swarm = SwarmBuilder::new(
+        transport,
+        behaviour,
+        peer_id
+    ).build();
 
+
+    // Listen on all interfaces and whatever port the OS assigns.
+    swarm.listen_on("/ip4/0.0.0.0/tcp/0".parse()?)?;
+
+    loop {
+        select! {
+            event = swarm.select_next_some() => match event {
+                _ => {
+                    println!("YOo");
+                }
+            }
+        }
+    }
 
     Ok(())
 

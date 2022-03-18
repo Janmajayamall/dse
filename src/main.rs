@@ -1,12 +1,11 @@
 use async_std::io;
 use async_std::prelude::StreamExt;
-use futures::{select, StreamExt};
 use libp2p::core::transport::Boxed;
 use libp2p::futures::stream::Peek;
 use libp2p::kad::{GetProvidersOk, Kademlia, KademliaEvent, QueryId, QueryResult, KademliaConfig, KadConnectionType};
 use libp2p::kad::record::store::MemoryStore;
-use libp2p::{NetworkBehaviour, PeerId};
-use libp2p::swarm::{NetworkBehaviour, NetworkBehaviourEventProcess, SwarmBuilder};
+use libp2p::{NetworkBehaviour, PeerId, Transport, Multiaddr};
+use libp2p::swarm::{NetworkBehaviour, NetworkBehaviourEventProcess, SwarmBuilder, SwarmEvent};
 use libp2p::identity::{Keypair};
 use libp2p::dns::TokioDnsConfig;
 use libp2p::tcp::TokioTcpConfig;
@@ -15,11 +14,11 @@ use libp2p::core::upgrade::SelectUpgrade;
 use libp2p::core::muxing::StreamMuxerBox;
 use libp2p::yamux::YamuxConfig;
 use libp2p::mplex::MplexConfig;
-
+use tokio::{select};
 use libp2p::noise;
-use std::io;
 use std::error;
 use std::time::Duration;
+
 
 #[derive(NetworkBehaviour)]
 #[behaviour(event_process = true)]
@@ -28,8 +27,18 @@ pub struct Behaviour {
 }
 
 impl NetworkBehaviourEventProcess<KademliaEvent> for Behaviour {
+
     fn inject_event(&mut self, event: KademliaEvent) {
-        println!("Received Kademlia event");
+        match event {
+            KademliaEvent::RoutingUpdated { peer, is_new_peer ,addresses, bucket_range, old_peer } => {
+                println!(
+                    "peerId {:?} address {:?} ", peer, addresses
+                );
+            }
+            _ => {
+
+            }
+        }
     }
 }
 
@@ -42,10 +51,13 @@ impl Behaviour {
         kad_config.set_query_timeout(Duration::from_secs(300));
         // set disjoint_query_paths to true. Ref: https://discuss.libp2p.io/t/s-kademlia-lookups-over-disjoint-paths-in-rust-libp2p/571
         kad_config.disjoint_query_paths(true);
-        let kademlia = Kademlia::with_config(peer_id, store, kad_config);
+        let mut kademlia = Kademlia::with_config(peer_id, store, kad_config);
 
 
-        // TODO supply and add bootstrap nodes
+        // add bootnode
+        let bootnode_addr : Multiaddr = "/ip4/65.108.59.231/tcp/37363".parse().expect("Invalid boot node address");
+        let bootnode_id : PeerId = "16Uiu2HAmBveJEVA6SLe8XCSWA14QTPgPA8wHMxdTa8aQVxno7c67".parse().expect("Invalida boot node peer id");
+        kademlia.add_address(&bootnode_id, bootnode_addr);
 
         Behaviour {
             kademlia,
@@ -74,11 +86,14 @@ pub fn build_transport(identity_keypair: &Keypair) -> io::Result<Boxed<(PeerId, 
     .boxed())
 }
 
-#[async_std::main]
+// #[async_std::main]
+#[tokio::main]
 async fn main() -> Result<(), Box<dyn error::Error>> {
     // create keypair for the node
     let keypair = Keypair::generate_secp256k1();
     let peer_id = keypair.public().to_peer_id();
+
+    println!("Node peer id {:?} ", peer_id.to_base58());
 
     // connect    
 
@@ -96,9 +111,16 @@ async fn main() -> Result<(), Box<dyn error::Error>> {
     // Listen on all interfaces and whatever port the OS assigns.
     swarm.listen_on("/ip4/0.0.0.0/tcp/0".parse()?)?;
 
+   
     loop {
         select! {
-            event = swarm.select_next_some() => match event {
+            event = swarm.next() => match event.expect("Event errored") {
+                SwarmEvent::NewListenAddr {listener_id , address} => {
+                    println!("New address {:?} reported by {:?} ", listener_id, address);
+                }
+                SwarmEvent::ConnectionEstablished {peer_id, endpoint, num_established, concurrent_dial_errors} => {
+                    println!("Connection establised");
+                }
                 _ => {
                     println!("YOo");
                 }

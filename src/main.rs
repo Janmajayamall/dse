@@ -32,7 +32,7 @@ impl NetworkBehaviourEventProcess<KademliaEvent> for Behaviour {
         match event {
             KademliaEvent::RoutingUpdated { peer, is_new_peer ,addresses, bucket_range, old_peer } => {
                 println!(
-                    "peerId {:?} address {:?} ", peer, addresses
+                    "RoutingUpdated with peerId {:?} address {:?} ", peer, addresses
                 );
             }
             _ => {
@@ -55,9 +55,19 @@ impl Behaviour {
 
 
         // add bootnode
-        let bootnode_addr : Multiaddr = "/ip4/65.108.59.231/tcp/37363".parse().expect("Invalid boot node address");
-        let bootnode_id : PeerId = "16Uiu2HAmBveJEVA6SLe8XCSWA14QTPgPA8wHMxdTa8aQVxno7c67".parse().expect("Invalida boot node peer id");
+        let bootnode_addr : Multiaddr = "/ip4/127.0.0.1/tcp/45195".parse().expect("Invalid boot node address");
+        let bootnode_id : PeerId = "16Uiu2HAkw4YUiioa9rCwVcgamNP1SkroWkgK433QWF2Ujt7ATGDX".parse().expect("Invalida boot node peer id");
         kademlia.add_address(&bootnode_id, bootnode_addr);
+
+        // bootstrap node
+        match kademlia.bootstrap() {
+            Ok(id) => {
+                println!("Bootstrap query id {:?} ", id);
+            }
+            Err(e) => {
+                println!("No known peers");
+            }
+        }
 
         Behaviour {
             kademlia,
@@ -86,7 +96,17 @@ pub fn build_transport(identity_keypair: &Keypair) -> io::Result<Boxed<(PeerId, 
     .boxed())
 }
 
-// #[async_std::main]
+struct CustomExecutor;
+
+impl libp2p::core::Executor for CustomExecutor {
+    fn exec(
+        &self,
+        future: std::pin::Pin<Box<dyn std::future::Future<Output = ()> + 'static + Send>>,
+    ) {
+        tokio::task::spawn(future);
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn error::Error>> {
     // create keypair for the node
@@ -95,9 +115,6 @@ async fn main() -> Result<(), Box<dyn error::Error>> {
 
     println!("Node peer id {:?} ", peer_id.to_base58());
 
-    // connect    
-
-
     // Build swarm
     let transport = build_transport(&keypair)?;
     let behaviour = Behaviour::new(peer_id).await;
@@ -105,7 +122,9 @@ async fn main() -> Result<(), Box<dyn error::Error>> {
         transport,
         behaviour,
         peer_id
-    ).build();
+    ).executor({
+        Box::new(CustomExecutor)
+    }).build();
 
 
     // Listen on all interfaces and whatever port the OS assigns.
@@ -114,16 +133,8 @@ async fn main() -> Result<(), Box<dyn error::Error>> {
    
     loop {
         select! {
-            event = swarm.next() => match event.expect("Event errored") {
-                SwarmEvent::NewListenAddr {listener_id , address} => {
-                    println!("New address {:?} reported by {:?} ", listener_id, address);
-                }
-                SwarmEvent::ConnectionEstablished {peer_id, endpoint, num_established, concurrent_dial_errors} => {
-                    println!("Connection establised");
-                }
-                _ => {
-                    println!("YOo");
-                }
+            event = swarm.next() => {
+                println!("Swarm event {:?} ", event);
             }
         }
     }
@@ -131,3 +142,16 @@ async fn main() -> Result<(), Box<dyn error::Error>> {
     Ok(())
 
 }
+
+
+// match event.expect("Event errored") {
+//                 SwarmEvent::NewListenAddr {listener_id , address} => {
+//                     println!("New address {:?} reported by {:?} ", listener_id, address);
+//                 }
+//                 SwarmEvent::ConnectionEstablished {peer_id, endpoint, num_established, concurrent_dial_errors} => {
+//                     println!("Connection establised");
+//                 }
+//                 _ => {
+//                     println!("YO {:?} ", event);
+//                 }
+//             }

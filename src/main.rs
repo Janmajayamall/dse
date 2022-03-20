@@ -1,4 +1,5 @@
-use async_std::io;
+use async_std::io::prelude::BufReadExt;
+use async_std::{self};
 use async_std::prelude::StreamExt;
 use libp2p::core::transport::Boxed;
 use libp2p::futures::stream::Peek;
@@ -15,11 +16,19 @@ use libp2p::core::muxing::StreamMuxerBox;
 use libp2p::yamux::YamuxConfig;
 use libp2p::mplex::MplexConfig;
 use libp2p::ping::{Ping, PingEvent, PingFailure, PingSuccess, PingConfig};
-use tokio::{select};
+use tokio::io::AsyncBufReadExt;
+use tokio::{select, io};
 use libp2p::noise;
 use std::error;
 use std::time::Duration;
+use structopt::StructOpt;
 
+#[derive(Debug, StructOpt)]
+#[structopt(name = "DSE args")]
+struct Opt {
+    boot_id: Option<String>,
+    boot_addr: Option<String>
+}
 
 #[derive(NetworkBehaviour)]
 #[behaviour(event_process = true)]
@@ -32,13 +41,15 @@ impl NetworkBehaviourEventProcess<KademliaEvent> for Behaviour {
     fn inject_event(&mut self, event: KademliaEvent) {
         match event {
             KademliaEvent::RoutingUpdated { peer, is_new_peer ,addresses, bucket_range, old_peer } => {
-                println!(
-                    "RoutingUpdated with peerId {:?} address {:?} ", peer, addresses
-                );
+                println!("kad: routing updated with peerId {:?} address {:?} ", peer, addresses);
             }
-            _ => {
-
+            KademliaEvent::InboundRequest{ request } => {
+                println!("kad: received inbound request {:?} ", request);
             }
+            KademliaEvent::OutboundQueryCompleted { id, result, stats } => {
+                println!("kad: outboud query completed for query id {:?} and result {:?} ", id, result);
+            }
+            _ => {}
         }
     }
 }
@@ -108,6 +119,8 @@ impl NetworkBehaviourEventProcess<PingEvent> for Behaviour {
 
 impl Behaviour {
     pub async fn new(peer_id: PeerId) -> Self  {
+        let opt = Opt::from_args();
+
         // setup kademlia
         let store = MemoryStore::new(peer_id);
         let mut kad_config = KademliaConfig::default();
@@ -123,9 +136,10 @@ impl Behaviour {
         let ping = Ping::new(ping_config);
 
         // add bootnode
-        let bootnode_addr : Multiaddr = "/ip4/127.0.0.1/tcp/42885".parse().expect("Invalid boot node address");
-        let bootnode_id : PeerId = "16Uiu2HAmJAuwyfNKsWawraToUURiBd7pXYqjZDsFLm3txCwFAmWo".parse().expect("Invalida boot node peer id");
-        kademlia.add_address(&bootnode_id, bootnode_addr);
+        if let (Some(boot_id),  Some(boot_addr)) = (opt.boot_id, opt.boot_addr) {
+            println!("Bootnode peerId {:?} multiAddr {:?} ", boot_id ,boot_addr);
+            kademlia.add_address(&boot_id.parse().expect("Bootnode Peer Id"), boot_addr.parse().expect("Bootnode Address"));
+        }
 
         Behaviour {
             kademlia,
@@ -156,7 +170,6 @@ pub fn build_transport(identity_keypair: &Keypair) -> io::Result<Boxed<(PeerId, 
 }
 
 struct CustomExecutor;
-
 impl libp2p::core::Executor for CustomExecutor {
     fn exec(
         &self,
@@ -199,28 +212,24 @@ async fn main() -> Result<(), Box<dyn error::Error>> {
         }
     }
 
+    // read std input
+    let mut stdin = async_std::io::BufReader::new(async_std::io::stdin()).lines();
+
    
     loop {
         select! {
             event = swarm.next() => {
                 println!("Swarm event {:?} ", event);
             }
+            line = stdin.next() => {
+                println!("line {:?}", line.expect("Line"));
+            }
         }
     }
 
     Ok(())
-
 }
 
-
-// match event.expect("Event errored") {
-//                 SwarmEvent::NewListenAddr {listener_id , address} => {
-//                     println!("New address {:?} reported by {:?} ", listener_id, address);
-//                 }
-//                 SwarmEvent::ConnectionEstablished {peer_id, endpoint, num_established, concurrent_dial_errors} => {
-//                     println!("Connection establised");
-//                 }
-//                 _ => {
-//                     println!("YO {:?} ", event);
-//                 }
-//             }
+async fn handle_input() {
+    
+}

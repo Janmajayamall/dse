@@ -14,6 +14,7 @@ use libp2p::core::upgrade::SelectUpgrade;
 use libp2p::core::muxing::StreamMuxerBox;
 use libp2p::yamux::YamuxConfig;
 use libp2p::mplex::MplexConfig;
+use libp2p::ping::{Ping, PingEvent, PingFailure, PingSuccess, PingConfig};
 use tokio::{select};
 use libp2p::noise;
 use std::error;
@@ -23,11 +24,11 @@ use std::time::Duration;
 #[derive(NetworkBehaviour)]
 #[behaviour(event_process = true)]
 pub struct Behaviour {
-    kademlia: Kademlia<MemoryStore>
+    kademlia: Kademlia<MemoryStore>,
+    ping: Ping,
 }
 
 impl NetworkBehaviourEventProcess<KademliaEvent> for Behaviour {
-
     fn inject_event(&mut self, event: KademliaEvent) {
         match event {
             KademliaEvent::RoutingUpdated { peer, is_new_peer ,addresses, bucket_range, old_peer } => {
@@ -42,6 +43,69 @@ impl NetworkBehaviourEventProcess<KademliaEvent> for Behaviour {
     }
 }
 
+impl NetworkBehaviourEventProcess<PingEvent> for Behaviour { 
+    fn inject_event(&mut self, event: PingEvent) {
+        match event {
+            PingEvent {
+                peer,
+                result: Result::Ok(
+                    PingSuccess::Ping {
+                        rtt
+                    }
+                )
+            } => {
+                println!(
+                    "ping: rtt {:?} from {:?}", rtt, peer
+                );
+            },
+            PingEvent {
+                peer,
+                result: Result::Ok(
+                    PingSuccess::Pong
+                )
+            } => {
+                println!(
+                    "ping: pong from {:?}", peer
+                );
+            }
+             PingEvent {
+                peer,
+                result: Result::Err(
+                    PingFailure::Timeout
+                )
+            } => {
+                println!(
+                    "ping: timeout to peer {:?}", peer
+                );
+            }
+            PingEvent {
+                peer,
+                result: Result::Err(
+                   PingFailure::Unsupported
+                )
+            } => {
+                println!(
+                    "ping: peer {:?} does not support ping", peer
+                );
+            }
+             PingEvent {
+                peer,
+                result: Result::Err(
+                   PingFailure::Other {
+                       error
+                   }
+                )
+            } => {
+                println!(
+                    "ping: failure with peer {:?}: {:?}", peer, error
+                );
+            }
+            
+        }
+    }
+}
+
+
 impl Behaviour {
     pub async fn new(peer_id: PeerId) -> Self  {
         // setup kademlia
@@ -54,23 +118,18 @@ impl Behaviour {
         let mut kademlia = Kademlia::with_config(peer_id, store, kad_config);
 
 
-        // add bootnode
-        let bootnode_addr : Multiaddr = "/ip4/127.0.0.1/tcp/45195".parse().expect("Invalid boot node address");
-        let bootnode_id : PeerId = "16Uiu2HAkw4YUiioa9rCwVcgamNP1SkroWkgK433QWF2Ujt7ATGDX".parse().expect("Invalida boot node peer id");
-        kademlia.add_address(&bootnode_id, bootnode_addr);
+        // ping
+        let ping_config = PingConfig::new().with_keep_alive(true);
+        let ping = Ping::new(ping_config);
 
-        // bootstrap node
-        match kademlia.bootstrap() {
-            Ok(id) => {
-                println!("Bootstrap query id {:?} ", id);
-            }
-            Err(e) => {
-                println!("No known peers");
-            }
-        }
+        // add bootnode
+        let bootnode_addr : Multiaddr = "/ip4/127.0.0.1/tcp/42885".parse().expect("Invalid boot node address");
+        let bootnode_id : PeerId = "16Uiu2HAmJAuwyfNKsWawraToUURiBd7pXYqjZDsFLm3txCwFAmWo".parse().expect("Invalida boot node peer id");
+        kademlia.add_address(&bootnode_id, bootnode_addr);
 
         Behaviour {
             kademlia,
+            ping,
         }
     }    
 }
@@ -129,6 +188,16 @@ async fn main() -> Result<(), Box<dyn error::Error>> {
 
     // Listen on all interfaces and whatever port the OS assigns.
     swarm.listen_on("/ip4/0.0.0.0/tcp/0".parse()?)?;
+
+    // bootstrap node
+    match swarm.behaviour_mut().kademlia.bootstrap() {
+        Ok(id) => {
+            println!("Bootstrap query id {:?} ", id);
+        }
+        Err(e) => {
+            println!("No known peers");
+        }
+    }
 
    
     loop {

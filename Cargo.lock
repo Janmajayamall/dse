@@ -635,6 +635,7 @@ dependencies = [
  "libp2p",
  "structopt",
  "tokio",
+ "void",
 ]
 
 [[package]]

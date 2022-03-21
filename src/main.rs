@@ -1,28 +1,13 @@
 use async_std::io::prelude::BufReadExt;
 use async_std::{self};
 use async_std::prelude::StreamExt;
-use libp2p::core::transport::Boxed;
-use libp2p::futures::stream::Peek;
-use libp2p::kad::{Quorum, GetProvidersOk, Kademlia, KademliaEvent, QueryId, QueryResult, KademliaConfig, KadConnectionType, BootstrapOk, GetClosestPeersOk, GetClosestPeersError, BootstrapError, GetRecordOk, GetRecordError, PutRecordOk, PutRecordError, Record};
-use libp2p::kad::record::store::MemoryStore;
-use libp2p::{NetworkBehaviour, PeerId, Transport, Multiaddr, Swarm};
-use libp2p::swarm::{NetworkBehaviour, NetworkBehaviourEventProcess, SwarmBuilder, SwarmEvent};
+use libp2p::kad::record::Key;
+use libp2p::kad::{Quorum, Record};
+use libp2p::{PeerId, Multiaddr};
 use libp2p::identity::{Keypair, secp256k1};
-use libp2p::dns::TokioDnsConfig;
-use libp2p::tcp::TokioTcpConfig;
-use libp2p::core::transport::upgrade::Version;
-use libp2p::core::upgrade::SelectUpgrade;
-use libp2p::core::muxing::StreamMuxerBox;
-use libp2p::core::ConnectedPoint;
-use libp2p::yamux::YamuxConfig;
-use libp2p::mplex::MplexConfig;
-use libp2p::ping::{Ping, PingEvent, PingFailure, PingSuccess, PingConfig};
-use libp2p::mdns::{Mdns, MdnsConfig, MdnsEvent};
-use tokio::io::AsyncBufReadExt;
-use tokio::{select, io};
-use libp2p::noise;
+use libp2p::mdns::{ MdnsEvent};
+use tokio::{select};
 use std::error;
-use std::time::Duration;
 use structopt::StructOpt;
 mod network;
 
@@ -47,39 +32,27 @@ struct Opt {
 async fn main() -> Result<(), Box<dyn error::Error>> {
     let opt = Opt::from_args();
 
-    let (mut client,mut network_event_receiver,mut network_interface) = network::new(opt.seed).await.expect("network::new failed");
+    let (mut client,mut network_event_receiver, network_interface) = network::new(opt.seed).await.expect("network::new failed");
 
     tokio::spawn(network_interface.run());
 
 
     // Listen on either provided opt value or any interface
     if let Some(listen_on) = opt.listen_on {
-        client.start_listening(listen_on).await;
+        let _ = client.start_listening(listen_on).await;
     }else {
-        client.start_listening("/ip4/0.0.0.0/tcp/0".parse()?).await;
+        let _ = client.start_listening("/ip4/0.0.0.0/tcp/0".parse()?).await;
     }
 
     // add bootnode
     if let (Some(boot_id),  Some(boot_addr)) = (opt.boot_id, opt.boot_addr) {
         println!("Bootnode peerId {:?} multiAddr {:?} ", boot_id, boot_addr);
-        client.add_address(boot_id, boot_addr).await;
+        let _ = client.add_address(boot_id, boot_addr).await;
     }
-
-
-    // // bootstrap node
-    // match swarm.behaviour_mut().kademlia.bootstrap() {
-    //     Ok(id) => {
-    //         println!("Bootstrap query id {:?} ", id);
-    //     }
-    //     Err(e) => {
-    //         println!("No known peers");
-    //     }
-    // }
 
     // read std input
     let mut stdin = async_std::io::BufReader::new(async_std::io::stdin()).lines();
 
-   
     loop {
         select! {
             event = network_event_receiver.recv() => {
@@ -99,10 +72,11 @@ async fn main() -> Result<(), Box<dyn error::Error>> {
                 };
             }
             line = stdin.next() => {    
-                if let Some(_line) = line {
-                    let val = _line.unwrap();
-                    println!("line {}", val);
-                    // handle_input(val, &mut swarm).await;
+                match line.expect("Line buffer errored") {
+                    Ok(l) => {
+                        handle_input(l, &mut client).await;
+                    }
+                    Err(e) => {}
                 }
             }
         }
@@ -111,67 +85,78 @@ async fn main() -> Result<(), Box<dyn error::Error>> {
     Ok(())
 }
 
-// async fn handle_input(command: String, swarm: &mut Swarm<network::Behaviour>) {
-//     let mut args = command.split(" ");
+async fn handle_input(command: String, client: &mut network::Client) {
+    let mut args = command.split(" ");
 
-//     match args.next() {
-//         Some("BOOTSTRAP") => {
-//             match swarm.behaviour_mut().kademlia.bootstrap() {
-//                 Ok(id) => {
-//                     println!("Bootstrapping with query {:?} ", id);
-//                 },
-//                 Err(e) => {
-//                     println!("No known peers for bootstrapping");
-//                 }
-//             }
-//         },
-//         Some("CLOSEST_PEERS") => {
-//             if let Some(id) = args.next() {
-//                 let peer_id: PeerId = id.parse().unwrap();
-//                 let query_id = swarm.behaviour_mut().kademlia.get_closest_peers(peer_id);
-//                 println!("Query id for closest peers to id {:?}: {:?} ", id, query_id);
-//             }else {
-//                 println!("Peer id not provided");
-//             }
-//         },
-//         Some("PUT") => {
-//             if let Some(key) = args.next() {
-//                 let val = args.next().expect("Value needed");
+    match args.next() {
+        Some("BOOTSTRAP") => {
+            match client.kad_bootstrap().await {
+                Ok(()) => {
+                    println!("BOOTSTRAP success!");
+                },
+                Err(e) => {
+                    println!("BOOTSTRAP failed with errpr {:?} ", e);
+                }
+            }
+        },
+        Some("PUT") => {
+            let key = {
+                match args.next() {
+                    Some(key) => Key::new(&key),
+                    None => {
+                        eprintln!("PUT record key missing!");
+                        return
+                    }                    
+                }
+            };
+            let value = {
+                match args.next() {
+                    Some(val) => val.into(),
+                    None => {
+                        eprintln!("PUT record value missing!");
+                        return
+                    }                    
+                }
+            };
+            
+            match client.dht_put(Record {
+                key,
+                value,
+                publisher: None,
+                expires: None,
+            }, Quorum::One).await {
+                Ok(put_record) => {
+                    println!("Put record success {:?} ", put_record);
+                }
+                Err(e) => {
+                    println!("Put record failed {:?} ", e);
+                }
+            }
+        },
+        Some("GET") => {
+            let key = {
+                match args.next() {
+                    Some(key) => Key::new(&key),
+                    None => {
+                        eprintln!("GET record key missing");
+                        return
+                    }
+                }
+            };
 
-//                 let record = Record {
-//                     key: key.to_owned().as_bytes().to_vec().into(),
-//                     value: val.as_bytes().to_vec(),
-//                     publisher: None,
-//                     expires: None,
-//                 };
-//                 let quorum = Quorum::One;
-
-//                 match swarm.behaviour_mut().kademlia.put_record(record, quorum) {
-//                     Ok(query_id) => {
-//                         println!("Put query id {:?} ", query_id);
-//                     },
-//                     Err(e) => {
-//                         println!("can't put record kad {:?} ", e);
-//                     }
-//                 }
-//             }
-//         },
-//         Some("GET") => {
-//             if let Some(key) = args.next() {
-//                 let quorum = Quorum::One;
-//                 let query_id = swarm.behaviour_mut().kademlia.get_record(key.as_bytes().to_vec().into(), quorum);
-//             }
-//         }
-//         Some("PEERS") => {
-//             let addresses = swarm.behaviour_mut().kademlia.kbuckets();
-//             for a in addresses {
-//                 for i in a.iter() {
-//                     println!("bucket node {:?} {:?} with status {:?} ", i.node.key, i.node.value, i.status);
-//                 }
-//             }
-//         }
-//         _ => {
-//             println!("Unrecognised command!");
-//         }
-//     }
-// }
+            match client.dht_get(key, Quorum::One).await {
+                Ok(get_record) => {
+                    println!("Get record success {:?} ", get_record);
+                },
+                Err(e) => {
+                    println!("Get record failed {:?} ", e);
+                }
+            }
+            
+        }
+        
+        _ => {
+            println!("Unrecognised command!");
+        }
+    }
+}

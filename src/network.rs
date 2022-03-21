@@ -4,7 +4,7 @@ use async_std::prelude::StreamExt;
 use libp2p::core::transport::Boxed;
 use libp2p::futures::stream::Peek;
 use libp2p::kad::record::Key;
-use libp2p::kad::{Quorum, GetProvidersOk, Kademlia, KademliaEvent, QueryId, QueryResult, KademliaConfig, KadConnectionType, BootstrapOk, GetClosestPeersOk, GetClosestPeersError, BootstrapError, GetRecordOk, GetRecordError, PutRecordOk, PutRecordError, Record};
+use libp2p::kad::{Quorum, GetProvidersOk, Kademlia, KademliaEvent, QueryId, QueryResult, KademliaConfig, KadConnectionType, BootstrapOk, GetClosestPeersOk, GetClosestPeersError, BootstrapError, GetRecordOk, GetRecordError, PutRecordOk, PutRecordError, Record, Addresses};
 use libp2p::kad::record::store::MemoryStore;
 use libp2p::{NetworkBehaviour, PeerId, Transport, Multiaddr, Swarm};
 use libp2p::swarm::{NetworkBehaviour, NetworkBehaviourEventProcess, SwarmBuilder, SwarmEvent};
@@ -15,11 +15,11 @@ use libp2p::core::transport::upgrade::Version;
 use libp2p::core::upgrade::SelectUpgrade;
 use libp2p::core::muxing::StreamMuxerBox;
 use libp2p::core::either::{EitherError};
+use libp2p::core::ConnectedPoint;
 use libp2p::yamux::YamuxConfig;
 use libp2p::mplex::MplexConfig;
 use libp2p::ping::{Ping, PingEvent, PingFailure, PingSuccess, PingConfig, self};
 use libp2p::mdns::{Mdns, MdnsConfig, MdnsEvent};
-use tokio::io::AsyncBufReadExt;
 use tokio::{select, io};
 use tokio::sync::{mpsc, oneshot};
 use libp2p::noise;
@@ -201,6 +201,14 @@ impl Client {
         ).await.expect("Command message dropped");
         receiver.await.expect("Client response message dropped")
     }
+
+    pub async fn kad_bootstrap(&mut self) -> Result<(), Box<dyn Error + Send>> {
+        let (sender, receiver) = oneshot::channel();
+        self.command_sender.send(
+            Command::Bootstrap { sender }
+        ).await.expect("Command message dropped");
+        receiver.await.expect("Client response message dropped")
+    }
 }
 
 pub struct NetworkInterface {
@@ -210,6 +218,8 @@ pub struct NetworkInterface {
     pending_dht_put_requests: HashMap<QueryId, oneshot::Sender<Result<PutRecordOk, Box<dyn Error + Send>>>>,
     pending_dht_get_requests: HashMap<QueryId, oneshot::Sender<Result<GetRecordOk, GetRecordError>>>,
     pending_add_peers: HashMap<PeerId, oneshot::Sender<Result<(), Box<dyn Error + Send>>>>,
+    pending_bootstrap_requests: HashMap<QueryId, oneshot::Sender<Result<(), Box<dyn Error + Send>>>>,
+    known_peers: HashMap<PeerId, Addresses>,
 }
 
 impl NetworkInterface {
@@ -225,6 +235,8 @@ impl NetworkInterface {
             pending_dht_put_requests: Default::default(),
             pending_dht_get_requests: Default::default(),
             pending_add_peers: Default::default(),
+            pending_bootstrap_requests: Default::default(),
+            known_peers: Default::default(),
         }
     }
 
@@ -255,7 +267,6 @@ impl NetworkInterface {
     async fn command_handler(&mut self, command: Command){
         match command {
             Command::StartListening { addr, sender } => {
-                println!("Recevied listening command");
                 match self.swarm.listen_on(addr) {
                     Ok(_) => {
                         let _ = sender.send(Ok(()));
@@ -266,7 +277,6 @@ impl NetworkInterface {
                 };
             },
             Command::AddPeer { peer_id, peer_addr, sender} => {
-                println!("Recevied add peer command {:?} {:?} ", peer_id, peer_addr);
                 self.swarm.behaviour_mut().kademlia.add_address(&peer_id, peer_addr);
                 let _ = sender.send(Ok(()));
             },
@@ -284,6 +294,16 @@ impl NetworkInterface {
                 let query_id = self.swarm.behaviour_mut().kademlia.get_record(key, quorum);
                 self.pending_dht_get_requests.insert(query_id, sender);
             },
+            Command::Bootstrap{sender} => {
+                match self.swarm.behaviour_mut().kademlia.bootstrap() {
+                    Ok(query_id) => {
+                        self.pending_bootstrap_requests.insert(query_id, sender);
+                    },
+                    Err(e) => {
+                        let _ = sender.send(Err(Box::new(e)));
+                    }
+                }
+            }
         }
     }
 
@@ -310,6 +330,24 @@ impl NetworkInterface {
                     QueryResult::GetRecord(Err(err)) => {
                         let _ = self.pending_dht_get_requests.remove(&id).expect("Get Request should be pending!").send(Err(err));
                     },
+                    QueryResult::Bootstrap(Ok(record)) => {
+                        println!("kad: Bootstrap with peer id {:?} success; num remaining {:?} ", record.peer, record.num_remaining);
+                        if record.num_remaining == 0 {
+                            let _ = self.pending_bootstrap_requests.remove(&id).expect("Bootstrap request should be pending!").send(Ok(()));
+                        }
+                    },
+                    QueryResult::Bootstrap(Err(err)) => {
+                        match err {
+                            BootstrapError::Timeout {
+                                peer, num_remaining
+                            } => {
+                                eprintln!("kad: Bootstrap with peer id {:?} failed; num remaining {:?} ", peer, num_remaining);
+                                if num_remaining.is_none() || num_remaining.unwrap() == 0 {
+                                    let _ = self.pending_bootstrap_requests.remove(&id).expect("Bootstrap request should be pending!").send(Err(Box::new(err)));
+                                }
+                            }
+                        }
+                    },
                     _ => {return}
                 }
             },
@@ -317,12 +355,30 @@ impl NetworkInterface {
                 KademliaEvent::RoutingUpdated { peer, addresses, .. }
             )) => { 
                 println!("kad: routing updated with peerId {:?} address {:?} ", peer, addresses);
+
+                // TODO: I haven't taken care of eviction of old peers here
+                self.known_peers.insert(peer, addresses);
             },
             SwarmEvent::IncomingConnection {local_addr, send_back_addr} => {
                 println!("swarm: incoming connection {:?} {:?} ", local_addr, send_back_addr);
             },
             SwarmEvent::ConnectionEstablished {peer_id, endpoint, num_established, ..} => {
                 println!("swarm: connection established {:?} {:?} {:?} ", peer_id, endpoint, num_established);
+                match endpoint {
+                    // Not sure whether this is the right practice for populating 
+                    // kad dht routing table of a node. 
+                    // At present, this is only needed for a bootstrap node since it needs
+                    // to maintain an uptodate view of kad routing table to facilitate bootstrapping
+                    // of new nodes to the network. 
+                    // We can skip this by a separate request that new node sends to be added
+                    // to bootstrap node's routing table. 
+                    ConnectedPoint::Listener { local_addr, send_back_addr } => {
+                        if !self.known_peers.contains_key(&peer_id) {
+                            self.swarm.behaviour_mut().kademlia.add_address(&peer_id, send_back_addr.clone());
+                        }
+                    }
+                    _ => {}
+                }
             },
             SwarmEvent::ConnectionClosed {peer_id, endpoint, num_established, cause} => {
                 println!("swarm: connection closed {:?} {:?} {:?} {:?} ", peer_id, endpoint, num_established, cause);
@@ -356,7 +412,10 @@ pub enum Command {
         key: Key,
         quorum: Quorum,
         sender: oneshot::Sender<Result<GetRecordOk, GetRecordError>>,
-    }
+    },
+    Bootstrap {
+        sender: oneshot::Sender<Result<(), Box<dyn Error + Send>>>,
+    },
 }
 
 #[derive(Debug)]

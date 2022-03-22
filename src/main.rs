@@ -4,8 +4,8 @@ use async_std::prelude::StreamExt;
 use libp2p::kad::record::Key;
 use libp2p::kad::{Quorum, Record};
 use libp2p::{PeerId, Multiaddr};
-use libp2p::identity::{Keypair, secp256k1};
 use libp2p::mdns::{ MdnsEvent};
+use libp2p::gossipsub::{self};
 use tokio::{select};
 use std::error;
 use structopt::StructOpt;
@@ -152,7 +152,25 @@ async fn handle_input(command: String, client: &mut network::Client) {
                     println!("Get record failed {:?} ", e);
                 }
             }
-            
+        },
+        Some("PUBLISH") => {
+            let message = {
+                match args.next() {
+                    Some(val) => val.into(),
+                    None =>{
+                        eprintln!("PUBLISH message missing!");
+                        return
+                    }
+                }
+            };
+            match client.publish_message(gossipsub::IdentTopic::new("Query"), message).await {
+                Ok(_) => {
+                    println!("Message published!");
+                },
+                Err(e) => {
+                    eprintln!("Message failed to publish with error {:?}!", e);
+                }
+            }
         }
         
         _ => {

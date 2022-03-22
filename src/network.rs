@@ -20,6 +20,7 @@ use libp2p::yamux::YamuxConfig;
 use libp2p::mplex::MplexConfig;
 use libp2p::ping::{Ping, PingEvent, PingFailure, PingSuccess, PingConfig, self};
 use libp2p::mdns::{Mdns, MdnsConfig, MdnsEvent};
+use libp2p::gossipsub::{self, Gossipsub, GossipsubEvent, error::{GossipsubHandlerError}};
 use tokio::{select, io};
 use tokio::sync::{mpsc, oneshot};
 use libp2p::noise;
@@ -34,10 +35,12 @@ pub struct Behaviour {
     kademlia: Kademlia<MemoryStore>,
     mdns: Mdns,
     ping: Ping,
+    gossipsub: Gossipsub,
 }
 
 impl Behaviour {
-    pub async fn new(peer_id: PeerId) -> Self  {
+    pub async fn new(keypair: &Keypair) -> Self  {
+        let peer_id = keypair.public().to_peer_id();
         // setup kademlia
         let store = MemoryStore::new(peer_id);
         let mut kad_config = KademliaConfig::default();
@@ -54,10 +57,18 @@ impl Behaviour {
         let ping_config = PingConfig::new().with_keep_alive(true);
         let ping = Ping::new(ping_config);
 
+        // gossipsub
+        let gossipsub_config = gossipsub::GossipsubConfigBuilder::default().validation_mode(gossipsub::ValidationMode::Strict).build().expect("Gossipsub config build failed!");
+        let mut gossipsub = Gossipsub::new(gossipsub::MessageAuthenticity::Signed(keypair.clone()), gossipsub_config).expect("Gossipsub failed to initialise!");
+
+        let topic = gossipsub::IdentTopic::new("Query");
+        gossipsub.subscribe(&topic).expect("Failed to subsribe to topic!");
+        
         Behaviour {
             kademlia,
             mdns,
             ping,
+            gossipsub,
         }
     }    
 }
@@ -66,6 +77,7 @@ pub enum BehaviourEvent {
     Kademlia(KademliaEvent),
     Ping(PingEvent),
     Mdns(MdnsEvent),
+    Gossipsub(GossipsubEvent)
 }
 
 impl From<KademliaEvent> for BehaviourEvent {
@@ -83,6 +95,12 @@ impl From<PingEvent> for BehaviourEvent {
 impl From<MdnsEvent> for BehaviourEvent {
     fn from(event: MdnsEvent) -> Self {
         BehaviourEvent::Mdns(event)
+    }
+}
+
+impl From<GossipsubEvent> for BehaviourEvent {
+    fn from(event: GossipsubEvent) -> Self {
+        BehaviourEvent::Gossipsub(event)
     }
 }
 
@@ -115,7 +133,7 @@ pub async fn new(
 
     // Build swarm
     let transport = build_transport(&keypair)?;
-    let behaviour = Behaviour::new(peer_id).await;
+    let behaviour = Behaviour::new(&keypair).await;
     let swarm = SwarmBuilder::new(
         transport,
         behaviour,
@@ -209,6 +227,14 @@ impl Client {
         ).await.expect("Command message dropped");
         receiver.await.expect("Client response message dropped")
     }
+
+    pub async fn publish_message(&mut self, topic: gossipsub::IdentTopic, message: String) -> Result<gossipsub::MessageId, gossipsub::error::PublishError> {
+        let (sender, receiver) = oneshot::channel();
+        self.command_sender.send(
+            Command::PublishMessage { topic, message, sender }
+        ).await.expect("Command message dropped");
+        receiver.await.expect("Client response message dropped")
+    }
 }
 
 pub struct NetworkInterface {
@@ -244,7 +270,6 @@ impl NetworkInterface {
         loop {
             select! {
                 command = self.command_receiver.recv() => {
-                    println!("Received command {:?} ", command);
                     match command {
                         Some(val) => {
                             self.command_handler(val).await
@@ -303,11 +328,21 @@ impl NetworkInterface {
                         let _ = sender.send(Err(Box::new(e)));
                     }
                 }
+            },
+            Command::PublishMessage { topic, message, sender} => {
+                match self.swarm.behaviour_mut().gossipsub.publish(topic, message) {
+                    Ok(message_id) => {
+                        let _ = sender.send(Ok(message_id));
+                    },
+                    Err(e) => {
+                        let _ = sender.send(Err(e));
+                    }
+                }
             }
         }
     }
 
-    async fn swarm_event_handler(&mut self, event: SwarmEvent<BehaviourEvent, EitherError<EitherError<std::io::Error, void::Void>, ping::Failure>>) {
+    async fn swarm_event_handler(&mut self, event: SwarmEvent<BehaviourEvent, EitherError<EitherError<EitherError<std::io::Error, void::Void>, ping::Failure>, GossipsubHandlerError>>) {
         match event {
             SwarmEvent::Behaviour(BehaviourEvent::Mdns(
                 event
@@ -359,6 +394,11 @@ impl NetworkInterface {
                 // TODO: I haven't taken care of eviction of old peers here
                 self.known_peers.insert(peer, addresses);
             },
+            SwarmEvent::Behaviour(BehaviourEvent::Gossipsub(
+                GossipsubEvent::Message { propagation_source, message_id, message } 
+            )) => {
+                println!("gossipsub: Received message {:?} ", message);
+            }
             SwarmEvent::IncomingConnection {local_addr, send_back_addr} => {
                 println!("swarm: incoming connection {:?} {:?} ", local_addr, send_back_addr);
             },
@@ -416,6 +456,11 @@ pub enum Command {
     Bootstrap {
         sender: oneshot::Sender<Result<(), Box<dyn Error + Send>>>,
     },
+    PublishMessage {
+        topic: gossipsub::IdentTopic,
+        message: String,
+        sender: oneshot::Sender<Result<gossipsub::MessageId, gossipsub::error::PublishError>>,
+    }
 }
 
 #[derive(Debug)]

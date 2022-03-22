@@ -27,6 +27,8 @@ use libp2p::noise;
 use std::error::Error;
 use std::time::Duration;
 use std::collections::{HashMap};
+use std::convert::{TryFrom, TryInto};
+use serde::{Deserialize, Serialize};
 
 
 #[derive(NetworkBehaviour)]
@@ -61,8 +63,8 @@ impl Behaviour {
         let gossipsub_config = gossipsub::GossipsubConfigBuilder::default().validation_mode(gossipsub::ValidationMode::Strict).build().expect("Gossipsub config build failed!");
         let mut gossipsub = Gossipsub::new(gossipsub::MessageAuthenticity::Signed(keypair.clone()), gossipsub_config).expect("Gossipsub failed to initialise!");
 
-        let topic = gossipsub::IdentTopic::new("Query");
-        gossipsub.subscribe(&topic).expect("Failed to subsribe to topic!");
+        // by default subcribe to search query topic
+        gossipsub.subscribe(&GossipsubTopic::SearchQuery.ident_topic().expect("Invalid gossipsub topic!")).expect("Failed to subsribe to topic!");
         
         Behaviour {
             kademlia,
@@ -228,10 +230,10 @@ impl Client {
         receiver.await.expect("Client response message dropped")
     }
 
-    pub async fn publish_message(&mut self, topic: gossipsub::IdentTopic, message: String) -> Result<gossipsub::MessageId, gossipsub::error::PublishError> {
+    pub async fn publish_message(&mut self, message: GossipsubMessage) -> Result<gossipsub::MessageId, Box<dyn Error>> {
         let (sender, receiver) = oneshot::channel();
         self.command_sender.send(
-            Command::PublishMessage { topic, message, sender }
+            Command::PublishMessage { message, sender }
         ).await.expect("Command message dropped");
         receiver.await.expect("Client response message dropped")
     }
@@ -329,13 +331,13 @@ impl NetworkInterface {
                     }
                 }
             },
-            Command::PublishMessage { topic, message, sender} => {
-                match self.swarm.behaviour_mut().gossipsub.publish(topic, message) {
+            Command::PublishMessage { message, sender} => {
+                match self.swarm.behaviour_mut().gossipsub.publish(message.topic(), message) {
                     Ok(message_id) => {
                         let _ = sender.send(Ok(message_id));
                     },
                     Err(e) => {
-                        let _ = sender.send(Err(e));
+                        let _ = sender.send(Err(Box::new(e)));
                     }
                 }
             }
@@ -395,9 +397,17 @@ impl NetworkInterface {
                 self.known_peers.insert(peer, addresses);
             },
             SwarmEvent::Behaviour(BehaviourEvent::Gossipsub(
-                GossipsubEvent::Message { propagation_source, message_id, message } 
+                GossipsubEvent::Message {message , ..} 
             )) => {
-                println!("gossipsub: Received message {:?} ", message);
+                println!("gossipsub: Received message {:?} ", message.clone());
+                match GossipsubMessage::try_from(message) {
+                    Ok(m) => {
+                        // TDAD message received
+                    },
+                    Err(e) => {
+                        // propogate the error
+                    }
+                }
             }
             SwarmEvent::IncomingConnection {local_addr, send_back_addr} => {
                 println!("swarm: incoming connection {:?} {:?} ", local_addr, send_back_addr);
@@ -457,9 +467,8 @@ pub enum Command {
         sender: oneshot::Sender<Result<(), Box<dyn Error + Send>>>,
     },
     PublishMessage {
-        topic: gossipsub::IdentTopic,
-        message: String,
-        sender: oneshot::Sender<Result<gossipsub::MessageId, gossipsub::error::PublishError>>,
+        message: GossipsubMessage,
+        sender: oneshot::Sender<Result<gossipsub::MessageId, Box<dyn Error>>>,
     }
 }
 
@@ -467,6 +476,79 @@ pub enum Command {
 pub enum NetworkEvent {
     Mdns(MdnsEvent),
 }
+
+#[derive(Debug)]
+#[derive(Serialize, Deserialize)]
+pub enum GossipsubMessage {
+    SearchQuery {
+        query: String,
+        metadata: String,
+    },
+}
+
+impl TryFrom<gossipsub::GossipsubMessage> for GossipsubMessage {
+    type Error = &'static str;
+    fn try_from(recv_message: gossipsub::GossipsubMessage) -> Result<Self, Self::Error> {
+        match serde_json::from_slice(&recv_message.data) {
+            Ok(v) => Ok(v),
+            Err(_) => Err("gossipsub: Conversion of received message to GossipsubMessage failed")
+        }
+    }
+}
+
+
+impl Into<Vec<u8>> for GossipsubMessage {
+    fn into(self) -> Vec<u8> {
+        match serde_json::to_vec(&self) {
+            Ok(v) => v,
+            Err(_) => Default::default()
+        }
+    }
+}
+
+impl GossipsubMessage {
+    fn topic(&self) -> gossipsub::IdentTopic {
+        match self {
+            GossipsubMessage::SearchQuery { .. } => {
+                gossipsub::IdentTopic::new("SearchQuery")
+            }
+        }
+    }
+}
+
+#[derive(Debug)]
+pub enum GossipsubTopic {
+    SearchQuery,
+    Unknown(String),
+}
+
+// TO BE DISCARDED, since GossipsubMessage handles topic conversion as well
+// impl GossipsubTopic {
+//     fn ident_topic(self) -> Option<gossipsub::IdentTopic> {
+//         match self {
+//             GossipsubTopic::SearchQuery => {
+//                 Some(gossipsub::IdentTopic::new("SearchQuery"))
+//             },
+//             GossipsubTopic::Unknown(val) => {
+//                 Some(gossipsub::IdentTopic::new(val))
+//             },
+//         }
+//     }
+// }
+// impl From<gossipsub::TopicHash> for GossipsubTopic {
+//     fn from(topic_hash: gossipsub::TopicHash) -> Self {
+//         GossipsubTopic::from(topic_hash.to_string())
+//     }
+// }
+// impl From<String> for GossipsubTopic {
+//     fn from(topic_string: String) -> Self {
+//         if (topic_string == "SearchQuery"){
+//             return GossipsubTopic::SearchQuery;
+//         }
+//         GossipsubTopic::Unknown(topic_string)
+//     }
+// }
+
 
 // impl NetworkBehaviourEventProcess<PingEvent> for Behaviour { 
 //     fn inject_event(&mut self, event: PingEvent) {

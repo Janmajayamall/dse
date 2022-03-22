@@ -64,7 +64,7 @@ impl Behaviour {
         let mut gossipsub = Gossipsub::new(gossipsub::MessageAuthenticity::Signed(keypair.clone()), gossipsub_config).expect("Gossipsub failed to initialise!");
 
         // by default subcribe to search query topic
-        gossipsub.subscribe(&GossipsubTopic::SearchQuery.ident_topic().expect("Invalid gossipsub topic!")).expect("Failed to subsribe to topic!");
+        gossipsub.subscribe(&GossipsubTopic::SearchQuery.ident_topic());
         
         Behaviour {
             kademlia,
@@ -401,12 +401,8 @@ impl NetworkInterface {
             )) => {
                 println!("gossipsub: Received message {:?} ", message.clone());
                 match GossipsubMessage::try_from(message) {
-                    Ok(m) => {
-                        // TDAD message received
-                    },
-                    Err(e) => {
-                        // propogate the error
-                    }
+                    Ok(m) => {self.network_event_sender.send(NetworkEvent::GossipsubMessageRecv(m));},
+                    Err(e) => {self.network_event_sender.send(NetworkEvent::GossipsubMessageRecvErr(e));}
                 }
             }
             SwarmEvent::IncomingConnection {local_addr, send_back_addr} => {
@@ -475,6 +471,8 @@ pub enum Command {
 #[derive(Debug)]
 pub enum NetworkEvent {
     Mdns(MdnsEvent),
+    GossipsubMessageRecv(GossipsubMessage),
+    GossipsubMessageRecvErr(&'static str)
 }
 
 #[derive(Debug)]
@@ -496,7 +494,6 @@ impl TryFrom<gossipsub::GossipsubMessage> for GossipsubMessage {
     }
 }
 
-
 impl Into<Vec<u8>> for GossipsubMessage {
     fn into(self) -> Vec<u8> {
         match serde_json::to_vec(&self) {
@@ -508,44 +505,38 @@ impl Into<Vec<u8>> for GossipsubMessage {
 
 impl GossipsubMessage {
     fn topic(&self) -> gossipsub::IdentTopic {
-        match self {
-            GossipsubMessage::SearchQuery { .. } => {
-                gossipsub::IdentTopic::new("SearchQuery")
-            }
-        }
+        GossipsubTopic::from_message(self).ident_topic()
     }
 }
 
 #[derive(Debug)]
 pub enum GossipsubTopic {
     SearchQuery,
-    Unknown(String),
 }
 
-// TO BE DISCARDED, since GossipsubMessage handles topic conversion as well
-// impl GossipsubTopic {
-//     fn ident_topic(self) -> Option<gossipsub::IdentTopic> {
-//         match self {
-//             GossipsubTopic::SearchQuery => {
-//                 Some(gossipsub::IdentTopic::new("SearchQuery"))
-//             },
-//             GossipsubTopic::Unknown(val) => {
-//                 Some(gossipsub::IdentTopic::new(val))
-//             },
-//         }
-//     }
-// }
-// impl From<gossipsub::TopicHash> for GossipsubTopic {
-//     fn from(topic_hash: gossipsub::TopicHash) -> Self {
-//         GossipsubTopic::from(topic_hash.to_string())
-//     }
-// }
+impl GossipsubTopic {
+    fn ident_topic(self) -> gossipsub::IdentTopic {
+        match self {
+            GossipsubTopic::SearchQuery => {
+                gossipsub::IdentTopic::new("SearchQuery")
+            },
+        }
+    }
+
+    fn from_message(message: &GossipsubMessage) -> Self {
+        match message {
+            GossipsubMessage::SearchQuery {..} => {
+                GossipsubTopic::SearchQuery
+            }
+        }
+    }
+}
+
 // impl From<String> for GossipsubTopic {
 //     fn from(topic_string: String) -> Self {
 //         if (topic_string == "SearchQuery"){
 //             return GossipsubTopic::SearchQuery;
 //         }
-//         GossipsubTopic::Unknown(topic_string)
 //     }
 // }
 

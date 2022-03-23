@@ -58,15 +58,17 @@ async fn main() -> Result<(), Box<dyn error::Error>> {
             event = network_event_receiver.recv() => {
                 match event {
                     Some(out) => {
-                       match out {
-                           network::NetworkEvent::Mdns(MdnsEvent::Discovered(list)) => {
-                                for node in list {
-                                    println!("Discovered node with peer id {:?} and multiaddr {:?} ", node.0, node.1);
-                                    client.add_address(node.0, node.1).await.expect("Client fn call dropped");
-                                }
-                           },
-                           _ => {}
-                       }
+                        println!("NetworkEvent: received {:?} ", out);
+                    //    match out {
+                    //        network::NetworkEvent::Mdns(MdnsEvent::Discovered(list)) => {
+                    //             for node in list {
+                    //                 println!("Discovered node with peer id {:?} and multiaddr {:?} ", node.0, node.1);
+                    //                 client.add_address(node.0, node.1).await.expect("Client fn call dropped");
+                    //             }
+                    //        },
+                           
+                    //        _ => {}
+                    //    }
                     },  
                     None => {}
                 };
@@ -156,14 +158,17 @@ async fn handle_input(command: String, client: &mut network::Client) {
         Some("PUBLISH") => {
             let message = {
                 match args.next() {
-                    Some(val) => val.into(),
+                    Some(val) => val,
                     None =>{
                         eprintln!("PUBLISH message missing!");
                         return
                     }
                 }
             };
-            match client.publish_message(gossipsub::IdentTopic::new("Query"), message).await {
+
+            let gossip_message = network::GossipsubMessage::SearchQuery { query: message.to_string(), metadata: message.to_string() };
+
+            match client.publish_message(gossip_message).await {
                 Ok(_) => {
                     println!("Message published!");
                 },

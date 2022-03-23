@@ -4,10 +4,11 @@ use async_std::prelude::StreamExt;
 use libp2p::core::transport::Boxed;
 use libp2p::futures::stream::Peek;
 use libp2p::kad::record::Key;
-use libp2p::kad::{Quorum, GetProvidersOk, Kademlia, KademliaEvent, QueryId, QueryResult, KademliaConfig, KadConnectionType, BootstrapOk, GetClosestPeersOk, GetClosestPeersError, BootstrapError, GetRecordOk, GetRecordError, PutRecordOk, PutRecordError, Record, Addresses};
+use libp2p::kad::{Quorum, Kademlia, KademliaEvent, QueryId, QueryResult, KademliaConfig, BootstrapError, GetRecordOk, GetRecordError, PutRecordOk, PutRecordError, Record, Addresses};
+use libp2p::request_response::{self, RequestResponse, RequestResponseCodec, RequestResponseConfig, RequestResponseEvent, RequestResponseMessage};
 use libp2p::kad::record::store::MemoryStore;
 use libp2p::{NetworkBehaviour, PeerId, Transport, Multiaddr, Swarm};
-use libp2p::swarm::{NetworkBehaviour, NetworkBehaviourEventProcess, SwarmBuilder, SwarmEvent};
+use libp2p::swarm::{ SwarmBuilder, SwarmEvent};
 use libp2p::identity::{Keypair, secp256k1};
 use libp2p::dns::TokioDnsConfig;
 use libp2p::tcp::TokioTcpConfig;
@@ -27,7 +28,7 @@ use libp2p::noise;
 use std::error::Error;
 use std::time::Duration;
 use std::collections::{HashMap};
-use std::convert::{TryFrom, TryInto};
+use std::convert::{TryFrom};
 use serde::{Deserialize, Serialize};
 
 
@@ -60,11 +61,12 @@ impl Behaviour {
         let ping = Ping::new(ping_config);
 
         // gossipsub
+        // TODO change gossipsub protocol identifier from default to something usable
         let gossipsub_config = gossipsub::GossipsubConfigBuilder::default().validation_mode(gossipsub::ValidationMode::Strict).build().expect("Gossipsub config build failed!");
         let mut gossipsub = Gossipsub::new(gossipsub::MessageAuthenticity::Signed(keypair.clone()), gossipsub_config).expect("Gossipsub failed to initialise!");
 
         // by default subcribe to search query topic
-        gossipsub.subscribe(&GossipsubTopic::SearchQuery.ident_topic());
+        gossipsub.subscribe(&GossipsubTopic::SearchQuery.ident_topic()).expect("Gossipsub subscription to topic SearchQuery failed!");
         
         Behaviour {
             kademlia,
@@ -230,7 +232,7 @@ impl Client {
         receiver.await.expect("Client response message dropped")
     }
 
-    pub async fn publish_message(&mut self, message: GossipsubMessage) -> Result<gossipsub::MessageId, Box<dyn Error>> {
+    pub async fn publish_message(&mut self, message: GossipsubMessage) -> Result<gossipsub::MessageId, Box<dyn Error + Send>> {
         let (sender, receiver) = oneshot::channel();
         self.command_sender.send(
             Command::PublishMessage { message, sender }
@@ -401,8 +403,8 @@ impl NetworkInterface {
             )) => {
                 println!("gossipsub: Received message {:?} ", message.clone());
                 match GossipsubMessage::try_from(message) {
-                    Ok(m) => {self.network_event_sender.send(NetworkEvent::GossipsubMessageRecv(m));},
-                    Err(e) => {self.network_event_sender.send(NetworkEvent::GossipsubMessageRecvErr(e));}
+                    Ok(m) => {self.network_event_sender.send(NetworkEvent::GossipsubMessageRecv(m)).await.expect("Network event message dropped");},
+                    Err(e) => {self.network_event_sender.send(NetworkEvent::GossipsubMessageRecvErr(e)).await.expect("Network event message dropped");}
                 }
             }
             SwarmEvent::IncomingConnection {local_addr, send_back_addr} => {
@@ -418,7 +420,7 @@ impl NetworkInterface {
                     // of new nodes to the network. 
                     // We can skip this by a separate request that new node sends to be added
                     // to bootstrap node's routing table. 
-                    ConnectedPoint::Listener { local_addr, send_back_addr } => {
+                    ConnectedPoint::Listener { send_back_addr , ..} => {
                         if !self.known_peers.contains_key(&peer_id) {
                             self.swarm.behaviour_mut().kademlia.add_address(&peer_id, send_back_addr.clone());
                         }
@@ -432,7 +434,7 @@ impl NetworkInterface {
             SwarmEvent::NewListenAddr {listener_id, address} => {
                 println!("swarm: new listener id {:?} and addr {:?} ", listener_id, address);
             },
-            _ => {return}
+            _ => {}
         }
     }
 
@@ -464,7 +466,7 @@ pub enum Command {
     },
     PublishMessage {
         message: GossipsubMessage,
-        sender: oneshot::Sender<Result<gossipsub::MessageId, Box<dyn Error>>>,
+        sender: oneshot::Sender<Result<gossipsub::MessageId, Box<dyn Error + Send>>>,
     }
 }
 
@@ -472,7 +474,7 @@ pub enum Command {
 pub enum NetworkEvent {
     Mdns(MdnsEvent),
     GossipsubMessageRecv(GossipsubMessage),
-    GossipsubMessageRecvErr(&'static str)
+    GossipsubMessageRecvErr(Box<dyn Error + Send>)
 }
 
 #[derive(Debug)]
@@ -485,11 +487,11 @@ pub enum GossipsubMessage {
 }
 
 impl TryFrom<gossipsub::GossipsubMessage> for GossipsubMessage {
-    type Error = &'static str;
+    type Error = Box<dyn std::error::Error + Send>;
     fn try_from(recv_message: gossipsub::GossipsubMessage) -> Result<Self, Self::Error> {
         match serde_json::from_slice(&recv_message.data) {
             Ok(v) => Ok(v),
-            Err(_) => Err("gossipsub: Conversion of received message to GossipsubMessage failed")
+            Err(e) => Err(Box::new(e))
         }
     }
 }
@@ -532,14 +534,76 @@ impl GossipsubTopic {
     }
 }
 
-// impl From<String> for GossipsubTopic {
-//     fn from(topic_string: String) -> Self {
-//         if (topic_string == "SearchQuery"){
-//             return GossipsubTopic::SearchQuery;
-//         }
-//     }
-// }
+// All stuff related to request response
 
+enum DseMessageRequest {
+    Bid {
+        name: String,
+    }
+}
+
+enum DseMessageResponse {
+    Big { 
+        name: String,
+    }
+}
+
+
+
+#[derive(Clone)]
+struct DseMessageProtocol ();
+
+impl request_response::ProtocolName for DseMessageProtocol { 
+    fn protocol_name(&self) -> &[u8] {
+        "/dse-message/1".as_bytes()
+    }
+}
+
+struct DseMessageCodec ();
+
+impl RequestResponseCodec for DseMessageCodec {
+    type Protocol = DseMessageProtocol;
+    type Request = DseMessageRequest;
+    type Response = DseMessageResponse;
+
+
+    fn read_request<T>(
+        &mut self, 
+        protocol: &Self::Protocol, 
+        io: &mut T
+    ) -> io::Result<Self::Request> {
+        // TODO
+    }
+   
+    fn read_response<T>(
+        &mut self, 
+        protocol: &Self::Protocol, 
+        io: & mut T
+    ) -> io::Result<Self::Response> {
+        // TODO
+    }
+
+    fn write_request<T>(
+        &mut self, 
+        protocol: &Self::Protocol, 
+        io: &mut T, 
+        req: Self::Request
+    ) -> io::Result<()> {
+        // TODO
+    }
+
+    fn write_response<T>(
+        &mut self, 
+        protocol: &Self::Protocol, 
+        io: & mut T, 
+        res: Self::Response
+    ) -> io::Result<()> {
+
+    }
+}
+
+
+// #[derive(Debug)]
 
 // impl NetworkBehaviourEventProcess<PingEvent> for Behaviour { 
 //     fn inject_event(&mut self, event: PingEvent) {

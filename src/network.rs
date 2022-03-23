@@ -1,11 +1,13 @@
 use async_std::io::prelude::BufReadExt;
 use async_std::{self};
+use async_trait::async_trait;
 use async_std::prelude::StreamExt;
+use futures::{AsyncRead, AsyncWrite};
 use libp2p::core::transport::Boxed;
 use libp2p::futures::stream::Peek;
 use libp2p::kad::record::Key;
 use libp2p::kad::{Quorum, Kademlia, KademliaEvent, QueryId, QueryResult, KademliaConfig, BootstrapError, GetRecordOk, GetRecordError, PutRecordOk, PutRecordError, Record, Addresses};
-use libp2p::request_response::{self, RequestResponse, RequestResponseCodec, RequestResponseConfig, RequestResponseEvent, RequestResponseMessage};
+use libp2p::request_response::{self, RequestResponse, RequestResponseCodec, RequestResponseConfig, RequestResponseEvent, RequestResponseMessage, ProtocolSupport};
 use libp2p::kad::record::store::MemoryStore;
 use libp2p::{NetworkBehaviour, PeerId, Transport, Multiaddr, Swarm};
 use libp2p::swarm::{ SwarmBuilder, SwarmEvent};
@@ -13,7 +15,7 @@ use libp2p::identity::{Keypair, secp256k1};
 use libp2p::dns::TokioDnsConfig;
 use libp2p::tcp::TokioTcpConfig;
 use libp2p::core::transport::upgrade::Version;
-use libp2p::core::upgrade::SelectUpgrade;
+use libp2p::core::upgrade::{SelectUpgrade, read_length_prefixed, write_length_prefixed};
 use libp2p::core::muxing::StreamMuxerBox;
 use libp2p::core::either::{EitherError};
 use libp2p::core::ConnectedPoint;
@@ -39,6 +41,7 @@ pub struct Behaviour {
     mdns: Mdns,
     ping: Ping,
     gossipsub: Gossipsub,
+    request_response: RequestResponse<DseMessageCodec>
 }
 
 impl Behaviour {
@@ -67,12 +70,16 @@ impl Behaviour {
 
         // by default subcribe to search query topic
         gossipsub.subscribe(&GossipsubTopic::SearchQuery.ident_topic()).expect("Gossipsub subscription to topic SearchQuery failed!");
+
+        // request response
+        let request_response = RequestResponse::new(DseMessageCodec(), std::iter::once((DseMessageProtocol(), ProtocolSupport::Full)), Default::default());
         
         Behaviour {
             kademlia,
             mdns,
             ping,
             gossipsub,
+            request_response,
         }
     }    
 }
@@ -81,7 +88,8 @@ pub enum BehaviourEvent {
     Kademlia(KademliaEvent),
     Ping(PingEvent),
     Mdns(MdnsEvent),
-    Gossipsub(GossipsubEvent)
+    Gossipsub(GossipsubEvent),
+    RequestResponse(RequestResponseEvent<DseMessageRequest, DseMessageResponse>),
 }
 
 impl From<KademliaEvent> for BehaviourEvent {
@@ -105,6 +113,12 @@ impl From<MdnsEvent> for BehaviourEvent {
 impl From<GossipsubEvent> for BehaviourEvent {
     fn from(event: GossipsubEvent) -> Self {
         BehaviourEvent::Gossipsub(event)
+    }
+}
+
+impl From<RequestResponseEvent<DseMessageRequest, DseMessageResponse>> for BehaviourEvent {
+    fn from(event: RequestResponseEvent<DseMessageRequest, DseMessageResponse>) -> Self {
+        BehaviourEvent::RequestResponse(event)
     }
 }
 
@@ -535,23 +549,23 @@ impl GossipsubTopic {
 }
 
 // All stuff related to request response
-
-enum DseMessageRequest {
+#[derive(Deserialize, Serialize, Debug)]
+pub enum DseMessageRequest {
     Bid {
         name: String,
     }
 }
 
-enum DseMessageResponse {
+#[derive(Deserialize, Serialize, Debug)]
+pub enum DseMessageResponse {
     Big { 
         name: String,
     }
 }
 
 
-
-#[derive(Clone)]
-struct DseMessageProtocol ();
+#[derive(Debug, Clone)]
+pub struct DseMessageProtocol ();
 
 impl request_response::ProtocolName for DseMessageProtocol { 
     fn protocol_name(&self) -> &[u8] {
@@ -559,46 +573,78 @@ impl request_response::ProtocolName for DseMessageProtocol {
     }
 }
 
+#[derive(Clone)]
 struct DseMessageCodec ();
 
+
+#[async_trait]
 impl RequestResponseCodec for DseMessageCodec {
     type Protocol = DseMessageProtocol;
     type Request = DseMessageRequest;
     type Response = DseMessageResponse;
 
 
-    fn read_request<T>(
+    async fn read_request<T>(
         &mut self, 
         protocol: &Self::Protocol, 
         io: &mut T
-    ) -> io::Result<Self::Request> {
-        // TODO
+    ) 
+    -> io::Result<Self::Request> 
+    where T: AsyncRead + Unpin + Send
+    {
+        let vec = read_length_prefixed(io, 10000000).await?;
+        match serde_json::from_slice(&vec) {
+            Ok(v) => Ok(v),
+            Err(e) => Err(io::ErrorKind::Other.into())
+        }
     }
    
-    fn read_response<T>(
+    async fn read_response<T>(
         &mut self, 
         protocol: &Self::Protocol, 
-        io: & mut T
-    ) -> io::Result<Self::Response> {
-        // TODO
+        io: &mut T
+    ) -> io::Result<Self::Response> 
+    where T: AsyncRead + Unpin + Send
+    {
+        let vec = read_length_prefixed(io, 10000000).await?;
+        match serde_json::from_slice(&vec) {
+            Ok(v) => Ok(v),
+            Err(_) => Err(io::ErrorKind::Other.into())
+        }
     }
 
-    fn write_request<T>(
+    async fn write_request<T>(
         &mut self, 
         protocol: &Self::Protocol, 
         io: &mut T, 
         req: Self::Request
-    ) -> io::Result<()> {
-        // TODO
+    ) -> io::Result<()> 
+    where T: AsyncWrite + Unpin + Send
+    {
+        match serde_json::to_vec(&req) {
+            Ok(val) => {
+                write_length_prefixed(io, &val).await?;
+                Ok(())
+            },
+            Err(_) => Err(io::ErrorKind::Other.into())
+        }
     }
 
-    fn write_response<T>(
+    async fn write_response<T>(
         &mut self, 
         protocol: &Self::Protocol, 
-        io: & mut T, 
+        io: &mut T, 
         res: Self::Response
-    ) -> io::Result<()> {
-
+    ) -> io::Result<()> 
+    where T: AsyncWrite + Unpin + Send
+    {
+        match serde_json::to_vec(&res) {
+            Ok(val) => {
+                write_length_prefixed(io, &val).await?;
+                Ok(())
+            },
+            Err(_) => Err(io::ErrorKind::Other.into())
+        }
     }
 }
 

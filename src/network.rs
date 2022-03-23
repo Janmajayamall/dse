@@ -263,6 +263,7 @@ pub struct NetworkInterface {
     pending_dht_get_requests: HashMap<QueryId, oneshot::Sender<Result<GetRecordOk, GetRecordError>>>,
     pending_add_peers: HashMap<PeerId, oneshot::Sender<Result<(), Box<dyn Error + Send>>>>,
     pending_bootstrap_requests: HashMap<QueryId, oneshot::Sender<Result<(), Box<dyn Error + Send>>>>,
+    pending_dse_message_requests: HashMap<request_response::RequestId, oneshot::Sender<Result<DseMessageResponse, Box<dyn Error + Send>>>>,
     known_peers: HashMap<PeerId, Addresses>,
 }
 
@@ -280,6 +281,7 @@ impl NetworkInterface {
             pending_dht_get_requests: Default::default(),
             pending_add_peers: Default::default(),
             pending_bootstrap_requests: Default::default(),
+            pending_dse_message_requests: Default::default(),
             known_peers: Default::default(),
         }
     }
@@ -356,6 +358,13 @@ impl NetworkInterface {
                         let _ = sender.send(Err(Box::new(e)));
                     }
                 }
+            },
+            Command::SendDseMessageResponse { message, sender } => {
+                // let d = self.swarm.behaviour_mut().request_response.send_response(ch, rs)
+            },
+            Command::SendDseMessageRequest { peer_id, message, sender } => {
+                let request_id = self.swarm.behaviour_mut().request_response.send_request(&peer_id, message);
+                self.pending_dse_message_requests.insert(request_id, sender);
             }
         }
     }
@@ -420,7 +429,29 @@ impl NetworkInterface {
                     Ok(m) => {self.network_event_sender.send(NetworkEvent::GossipsubMessageRecv(m)).await.expect("Network event message dropped");},
                     Err(e) => {self.network_event_sender.send(NetworkEvent::GossipsubMessageRecvErr(e)).await.expect("Network event message dropped");}
                 }
-            }
+            },
+            SwarmEvent::Behaviour(BehaviourEvent::RequestResponse(
+                RequestResponseEvent::Message { peer, message }
+            )) => {
+                match message {
+                    RequestResponseMessage::Request { request_id, request, channel} => {
+                        // TODO notify that a request has been received
+                    },
+                    RequestResponseMessage::Response { request_id, response } => {
+                        self.pending_dse_message_requests.remove(&request_id).expect("Outbound Request should be pending!").send(Ok(response));
+                    }
+                }
+            },
+            SwarmEvent::Behaviour(BehaviourEvent::RequestResponse(
+                RequestResponseEvent::ResponseSent { peer, request_id }
+            )) => {
+                
+            },
+            SwarmEvent::Behaviour(BehaviourEvent::RequestResponse(
+                RequestResponseEvent::OutboundFailure { peer, request_id, error } 
+            )) => {
+                self.pending_dse_message_requests.remove(&request_id).expect("Outbound Request should be pending!").send(Err(Box::new(error)));
+            },
             SwarmEvent::IncomingConnection {local_addr, send_back_addr} => {
                 println!("swarm: incoming connection {:?} {:?} ", local_addr, send_back_addr);
             },
@@ -481,6 +512,15 @@ pub enum Command {
     PublishMessage {
         message: GossipsubMessage,
         sender: oneshot::Sender<Result<gossipsub::MessageId, Box<dyn Error + Send>>>,
+    },
+    SendDseMessageResponse {
+        message: DseMessageResponse,
+        sender: oneshot::Sender<Result<(), Box<dyn Error + Send>>>,
+    },
+    SendDseMessageRequest {
+        peer_id: PeerId,
+        message: DseMessageRequest,
+        sender: oneshot::Sender<Result<DseMessageResponse, Box<dyn Error + Send>>>,
     }
 }
 
@@ -551,15 +591,15 @@ impl GossipsubTopic {
 // All stuff related to request response
 #[derive(Deserialize, Serialize, Debug)]
 pub enum DseMessageRequest {
-    Bid {
+    PlaceBid {
         name: String,
     }
 }
 
 #[derive(Deserialize, Serialize, Debug)]
 pub enum DseMessageResponse {
-    Big { 
-        name: String,
+    AckBid { 
+        name: String
     }
 }
 
@@ -582,7 +622,6 @@ impl RequestResponseCodec for DseMessageCodec {
     type Protocol = DseMessageProtocol;
     type Request = DseMessageRequest;
     type Response = DseMessageResponse;
-
 
     async fn read_request<T>(
         &mut self, 

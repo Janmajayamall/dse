@@ -10,6 +10,7 @@ use tokio::{select};
 use std::error;
 use structopt::StructOpt;
 mod network;
+mod handler;
 
 #[derive(Debug, StructOpt)]
 #[structopt(name = "DSE args")]

@@ -2,6 +2,7 @@ use async_std::io::prelude::BufReadExt;
 use async_std::{self};
 use async_trait::async_trait;
 use async_std::prelude::StreamExt;
+use chrono;
 use futures::{AsyncRead, AsyncWrite};
 use libp2p::core::transport::Boxed;
 use libp2p::futures::stream::Peek;
@@ -21,7 +22,7 @@ use libp2p::core::either::{EitherError};
 use libp2p::core::ConnectedPoint;
 use libp2p::yamux::YamuxConfig;
 use libp2p::mplex::MplexConfig;
-use libp2p::ping::{Ping, PingEvent, PingFailure, PingSuccess, PingConfig, self};
+use libp2p::ping::{Ping, PingEvent, PingConfig, self};
 use libp2p::mdns::{Mdns, MdnsConfig, MdnsEvent};
 use libp2p::gossipsub::{self, Gossipsub, GossipsubEvent, error::{GossipsubHandlerError}};
 use tokio::{select, io};
@@ -32,6 +33,8 @@ use std::time::Duration;
 use std::collections::{HashMap};
 use std::convert::{TryFrom};
 use serde::{Deserialize, Serialize};
+
+use super::handler;
 
 
 #[derive(NetworkBehaviour)]
@@ -264,6 +267,7 @@ pub struct NetworkInterface {
     pending_add_peers: HashMap<PeerId, oneshot::Sender<Result<(), Box<dyn Error + Send>>>>,
     pending_bootstrap_requests: HashMap<QueryId, oneshot::Sender<Result<(), Box<dyn Error + Send>>>>,
     pending_dse_message_requests: HashMap<request_response::RequestId, oneshot::Sender<Result<DseMessageResponse, Box<dyn Error + Send>>>>,
+    pending_dse_message_response: HashMap<request_response::RequestId, oneshot::Sender<Result<(), Box<dyn Error + Send>>>>,
     known_peers: HashMap<PeerId, Addresses>,
 }
 
@@ -282,6 +286,7 @@ impl NetworkInterface {
             pending_add_peers: Default::default(),
             pending_bootstrap_requests: Default::default(),
             pending_dse_message_requests: Default::default(),
+            pending_dse_message_response: Default::default(),
             known_peers: Default::default(),
         }
     }
@@ -359,9 +364,21 @@ impl NetworkInterface {
                     }
                 }
             },
-            Command::SendDseMessageResponse { message, sender } => {
-                // let d = self.swarm.behaviour_mut().request_response.send_response(ch, rs)
-            },
+            Command::SendDseMessageResponse { request_id, channel, response, sender } => {  
+                match self.swarm.behaviour_mut().request_response.send_response(channel, response) {
+                    Ok(_) => {
+                        self.pending_dse_message_response.insert(request_id, sender);
+                    }
+                    Err(_) => {
+                        // send_response returns Error, when
+                        // ResponseChannel is already closed
+                        // due to Timeout or Connection Err.
+                        // Thus, we send InboundFailure::Timeout 
+                        // here as the error.
+                        let _ = sender.send(Err(Box::new(request_response::InboundFailure::Timeout)));
+                    }
+                }
+            }
             Command::SendDseMessageRequest { peer_id, message, sender } => {
                 let request_id = self.swarm.behaviour_mut().request_response.send_request(&peer_id, message);
                 self.pending_dse_message_requests.insert(request_id, sender);
@@ -435,7 +452,7 @@ impl NetworkInterface {
             )) => {
                 match message {
                     RequestResponseMessage::Request { request_id, request, channel} => {
-                        // TODO notify that a request has been received
+                       self.network_event_sender.send(NetworkEvent::DseMessageRequestRecv { request_id, request, channel }).await.expect("Network evvent message dropped");
                     },
                     RequestResponseMessage::Response { request_id, response } => {
                         self.pending_dse_message_requests.remove(&request_id).expect("Outbound Request should be pending!").send(Ok(response));
@@ -445,12 +462,23 @@ impl NetworkInterface {
             SwarmEvent::Behaviour(BehaviourEvent::RequestResponse(
                 RequestResponseEvent::ResponseSent { peer, request_id }
             )) => {
-                
+                self.pending_dse_message_response.remove(&request_id).expect("Outbound Request should be pending!").send(Ok(()));
             },
             SwarmEvent::Behaviour(BehaviourEvent::RequestResponse(
                 RequestResponseEvent::OutboundFailure { peer, request_id, error } 
             )) => {
                 self.pending_dse_message_requests.remove(&request_id).expect("Outbound Request should be pending!").send(Err(Box::new(error)));
+            },
+            SwarmEvent::Behaviour(BehaviourEvent::RequestResponse(
+                RequestResponseEvent::InboundFailure { peer, request_id, error } 
+            )) => {
+                // RequestResponseEvent::InboundFailure is thrown anytime
+                // (like channel timeout of channel dropped) irrespective 
+                // of whether there was a response initiated by client commands.
+                match self.pending_dse_message_requests.remove(&request_id) {
+                    Some(sender) => {sender.send(Err(Box::new(error)));}
+                    None => {}
+                }
             },
             SwarmEvent::IncomingConnection {local_addr, send_back_addr} => {
                 println!("swarm: incoming connection {:?} {:?} ", local_addr, send_back_addr);
@@ -514,7 +542,9 @@ pub enum Command {
         sender: oneshot::Sender<Result<gossipsub::MessageId, Box<dyn Error + Send>>>,
     },
     SendDseMessageResponse {
-        message: DseMessageResponse,
+        request_id: request_response::RequestId,
+        channel: request_response::ResponseChannel<DseMessageResponse>,
+        response: DseMessageResponse,
         sender: oneshot::Sender<Result<(), Box<dyn Error + Send>>>,
     },
     SendDseMessageRequest {
@@ -528,15 +558,22 @@ pub enum Command {
 pub enum NetworkEvent {
     Mdns(MdnsEvent),
     GossipsubMessageRecv(GossipsubMessage),
-    GossipsubMessageRecvErr(Box<dyn Error + Send>)
+    GossipsubMessageRecvErr(Box<dyn Error + Send>),
+    DseMessageRequestRecv {
+        request_id: request_response::RequestId,
+        request: DseMessageRequest,
+        channel: request_response::ResponseChannel<DseMessageResponse>,
+    },
 }
 
 #[derive(Debug)]
 #[derive(Serialize, Deserialize)]
 pub enum GossipsubMessage {
     SearchQuery {
+        id: handler::SearchId,
         query: String,
         metadata: String,
+        expires_at: chrono::DateTime<chrono::Utc>,
     },
 }
 

@@ -2,10 +2,8 @@ use async_std::io::prelude::BufReadExt;
 use async_std::{self};
 use async_trait::async_trait;
 use async_std::prelude::StreamExt;
-use chrono;
 use futures::{AsyncRead, AsyncWrite};
 use libp2p::core::transport::Boxed;
-use libp2p::futures::stream::Peek;
 use libp2p::kad::record::Key;
 use libp2p::kad::{Quorum, Kademlia, KademliaEvent, QueryId, QueryResult, KademliaConfig, BootstrapError, GetRecordOk, GetRecordError, PutRecordOk, PutRecordError, Record, Addresses};
 use libp2p::request_response::{self, RequestResponse, RequestResponseCodec, RequestResponseConfig, RequestResponseEvent, RequestResponseMessage, ProtocolSupport};
@@ -256,7 +254,24 @@ impl Client {
         ).await.expect("Command message dropped");
         receiver.await.expect("Client response message dropped")
     }
+
+    pub async fn send_dse_message_request(&mut self, peer_id: PeerId, message: DseMessageRequest) -> Result<DseMessageResponse, Box<dyn Error + Send>> {
+        let (sender, receiver) = oneshot::channel();
+        self.command_sender.send(
+            Command::SendDseMessageRequest { peer_id, message, sender }
+        ).await.expect("Command message dropped");
+        receiver.await.expect("Client response message dropped")
+    }
+
+    pub async fn send_dse_message_response(&mut self, request_id: request_response::RequestId, channel: request_response::ResponseChannel<DseMessageResponse>, response: DseMessageResponse ) -> Result<(), Box<dyn Error + Send>> {
+        let (sender, receiver) = oneshot::channel();
+        self.command_sender.send(
+            Command::SendDseMessageResponse { request_id, channel, response, sender }
+        ).await.expect("Command message dropped");
+        receiver.await.expect("Client response message dropped")
+    }
 }
+
 
 pub struct NetworkInterface {
     swarm: Swarm<Behaviour>,
@@ -569,12 +584,7 @@ pub enum NetworkEvent {
 #[derive(Debug)]
 #[derive(Serialize, Deserialize)]
 pub enum GossipsubMessage {
-    SearchQuery {
-        id: handler::SearchId,
-        query: String,
-        metadata: String,
-        expires_at: chrono::DateTime<chrono::Utc>,
-    },
+    SearchQuery(handler::SearchQuery),
 }
 
 impl TryFrom<gossipsub::GossipsubMessage> for GossipsubMessage {
@@ -628,16 +638,12 @@ impl GossipsubTopic {
 // All stuff related to request response
 #[derive(Deserialize, Serialize, Debug)]
 pub enum DseMessageRequest {
-    PlaceBid {
-        name: String,
-    }
+    PlaceBid(client::Bid),
 }
 
 #[derive(Deserialize, Serialize, Debug)]
 pub enum DseMessageResponse {
-    AckBid { 
-        name: String
-    }
+    AckBid(handler::AckBid),
 }
 
 

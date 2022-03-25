@@ -11,6 +11,7 @@ use std::error;
 use structopt::StructOpt;
 mod network;
 mod handler;
+mod indexer;
 
 #[derive(Debug, StructOpt)]
 #[structopt(name = "DSE args")]
@@ -59,17 +60,32 @@ async fn main() -> Result<(), Box<dyn error::Error>> {
             event = network_event_receiver.recv() => {
                 match event {
                     Some(out) => {
-                        println!("NetworkEvent: received {:?} ", out);
-                    //    match out {
-                    //        network::NetworkEvent::Mdns(MdnsEvent::Discovered(list)) => {
-                    //             for node in list {
-                    //                 println!("Discovered node with peer id {:?} and multiaddr {:?} ", node.0, node.1);
-                    //                 client.add_address(node.0, node.1).await.expect("Client fn call dropped");
-                    //             }
-                    //        },
-                           
-                    //        _ => {}
-                    //    }
+                        // println!("NetworkEvent: received {:?} ", out);
+                        match out {
+                           network::NetworkEvent::Mdns(MdnsEvent::Discovered(list)) => {
+                                for node in list {
+                                    println!("Discovered node with peer id {:?} and multiaddr {:?} ", node.0, node.1);
+                                    client.add_address(node.0, node.1).await.expect("Client fn call dropped");
+                                }
+                           },
+                           network::NetworkEvent::GossipsubMessageRecv(message) => {
+                                match message {
+                                    network::GossipsubMessage::SearchQuery {id, query, metadata, expires_at} => {
+                                        // TODO place the bid?
+                                    },
+                                    _ => {}
+                                }
+                           },
+                           network::NetworkEvent::DseMessageRequestRecv {request_id, request, channel} => {
+                                match request {
+                                    network::DseMessageRequest::PlaceBid {query_id, bid} => {
+                                        // ACK the bid
+                                    },
+                                    _ => {}
+                                }
+                           },
+                           _ => {}
+                       }
                     },  
                     None => {}
                 };

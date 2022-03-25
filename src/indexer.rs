@@ -78,6 +78,8 @@ impl Indexer {
 
     }
 
+    // Indexer events would come from RPC endpoint
+
 }
 
 // Note - 

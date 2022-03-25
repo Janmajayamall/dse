@@ -37,16 +37,21 @@ DSE p2p network uses -
 
 DSE uses time-locked on-chain wallets and state channels for gasless trades, thus allowing trade of value as low as 1 cent to happen on p2p network.
 
-### Lifecycle of a trade
+### Peer discovery
 
-Consider requester node as **A** and provider node as **B**.
+### Information Query and Bids
 
-1. Node A publishes a information query on the p2p network. Since every node understands gossipsub protocol and is subscribed to "Query" topic, the query will be relayed to every node.
-2. Consider that node B, B1, B2, B3 are interested in servicing the query. All of the will prepare their **Bid** for servicing the query and send it to Node A. Node A upon receiving their bid will reply with acknowledgement.
-3. Node A aftere reviewing all bids, selects node B's bid. Node A sends **Bid Acceptance** to Node B. Node B upon receving bid acceptance replies with acknoledgement.
-4. Node A and B now engage in commitment of funds (as specified in the bid) for the trade. Funds commitement follow **Progressive commitment**.
-5. Node B now proceeds to service the query of Node A
-6. [Pending]
+Consider service requester node **A** and service provider node **B**.
+
+1. Node A publishes their "Query" on the p2p network. Every node on the network subscribes to "Query" topics, thus A's query is progated throughout the network.
+2. Node B receives Node A's query and processes. After processing it decides to place a bid.
+3. B sends "PlaceBid" request to A, after which A sends "AckPlaceBid" response to B. (A would have received "PlaceBid" request from several nodes)
+4. A select B's bid as the winning bid. A sends "AcceptBid" request to B, after which B sends "AckAcceptBid" response to B.
+5. B checks whether still want to seervice A's query. If yes, B proceeds to (6). If no, interaction stops here and A would choose some other bid after a buffer period.
+6. B sends "StartCommit" request to A, after which A sends "AckStartCommit" response to B.
+7. Commitment of funds necessary for the exchange happens. Once commitment of funds end, A & B receive an event.
+8. B sends "QueryResponse" request to A, after which A sends "AckQueryResponse" response to B.
+9. [Unlocking of funds is still WIP...]
 
 ### Time locked wallets & commitments
 
@@ -82,6 +87,14 @@ Node A (service requester) and Node B (service provider) wants to trade, but Nod
 To minize the loss when one party renges from locking up funds for commitment, whereas other has already committed, commitment is made progressively.
 
 So if Node A and B agreed to lock amount X for the trade, they progressively commit 0.1X in 10 rounds. Where every subsequent round of commitment only happends if both Node A and B committed their rspective share in last round. Thus, the malcious user can only fraud honest user for 0.1X.
+
+### Extras
+
+[Will be organised into sections a bit later]
+
+1. Unique ID for a search query - Keccack256(Peer_id + Query count)
+2. Users will run their own node with which they will interact over a REST API (Will be developed later)
+3.
 
 ### Random questions
 

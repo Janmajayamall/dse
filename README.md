@@ -53,6 +53,8 @@ Consider service requester node **A** and service provider node **B**.
 8. B sends "QueryResponse" request to A, after which A sends "AckQueryResponse" response to B.
 9. [Unlocking of funds is still WIP...]
 
+### Commitment of Funds
+
 ### Time locked wallets & commitments
 
 Time-locked wallets work the following way -
@@ -77,7 +79,9 @@ If 2 users interact very often, they can choose to setup a state channel between
 
 ### BLS signatures
 
-Used for making redeeming commitments and proving double commitments on-chain cheap.
+If we use BLS signature aggregation for proving commitment (in case of withdrawal or fraud) on-chain, it will require n + 1 pairing operations (n = no. of commitments, since every commitment is different).
+
+Gas cost of a pairing operation (34000 _ n + 45000) is lot greater than gas cost of ECDSA verification (3000). But I think considering that on l2 - l2 gas price is around 0.001 and l1 data cost is around 40 (depends on l1 gas cost), BLS aggregation might still be a better option. This is because calldata in case of BLS aggregation would be just a signature (64 bytes) + list of indexes (32 bytes). In case of ECDSA calldata will be n _ 32 (n = no. of signatures) + list of indexes (32 bytes).
 
 ### Progressive commitment
 

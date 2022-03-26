@@ -34,22 +34,24 @@ struct Opt {
 async fn main() -> Result<(), Box<dyn error::Error>> {
     let opt = Opt::from_args();
 
-    let (mut client,mut network_event_receiver, network_interface) = network::new(opt.seed).await.expect("network::new failed");
+    let (mut network_client,mut network_event_receiver, network_interface) = network::new(opt.seed).await.expect("network::new failed");
+    let (indexer_client, indexer_event_receiver, indexer_interface) = indexer::new();
 
     tokio::spawn(network_interface.run());
+    tokio::spawn(indexer_interface.run());
 
 
     // Listen on either provided opt value or any interface
     if let Some(listen_on) = opt.listen_on {
-        let _ = client.start_listening(listen_on).await;
+        let _ = network_client.start_listening(listen_on).await;
     }else {
-        let _ = client.start_listening("/ip4/0.0.0.0/tcp/0".parse()?).await;
+        let _ = network_client.start_listening("/ip4/0.0.0.0/tcp/0".parse()?).await;
     }
 
     // add bootnode
     if let (Some(boot_id),  Some(boot_addr)) = (opt.boot_id, opt.boot_addr) {
         println!("Bootnode peerId {:?} multiAddr {:?} ", boot_id, boot_addr);
-        let _ = client.add_address(boot_id, boot_addr).await;
+        let _ = network_client.add_address(boot_id, boot_addr).await;
     }
 
     // read std input
@@ -70,8 +72,8 @@ async fn main() -> Result<(), Box<dyn error::Error>> {
                            },
                            network::NetworkEvent::GossipsubMessageRecv(message) => {
                                 match message {
-                                    network::GossipsubMessage::SearchQuery {id, query, metadata, expires_at} => {
-                                        // TODO place the bid?
+                                    network::GossipsubMessage::SearchQuery(query) => {
+                                        
                                     },
                                     _ => {}
                                 }
@@ -90,6 +92,19 @@ async fn main() -> Result<(), Box<dyn error::Error>> {
                     None => {}
                 };
             }
+            event = indexer_event_receiver.recv() => {
+                match event {
+                    Some(out) => {
+                        use indexer::IndexerEvent;
+                        match out {
+                            IndexerEvent::PlaceBid(bid) => {
+                                match self.network_client.send_dse_message_request()
+                            }
+                        }
+                    },
+                    None => {}
+                }
+            },
             line = stdin.next() => {    
                 match line.expect("Line buffer errored") {
                     Ok(l) => {

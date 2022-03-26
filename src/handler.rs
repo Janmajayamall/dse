@@ -1,3 +1,4 @@
+use libp2p::{PeerId};
 use serde::{Deserialize, Serialize};
 
 use super::network;
@@ -7,6 +8,7 @@ pub type QueryId = [u8; 32];
 #[derive(Debug, Serialize, Deserialize)]
 pub struct SearchQuery {
     id: QueryId,
+    peer_id: PeerId,
     query: String,
     metadata: String,
     expires_at: chrono::DateTime<chrono::Utc>,

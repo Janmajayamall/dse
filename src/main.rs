@@ -13,6 +13,7 @@ use structopt::StructOpt;
 mod network;
 mod handler;
 mod indexer;
+mod server;
 
 #[derive(Debug, StructOpt)]
 #[structopt(name = "DSE args")]

@@ -9,6 +9,7 @@ use libp2p::gossipsub::{self};
 use tokio::{select};
 use std::error;
 use structopt::StructOpt;
+
 mod network;
 mod handler;
 mod indexer;
@@ -35,7 +36,7 @@ async fn main() -> Result<(), Box<dyn error::Error>> {
     let opt = Opt::from_args();
 
     let (mut network_client,mut network_event_receiver, network_interface) = network::new(opt.seed).await.expect("network::new failed");
-    let (indexer_client, indexer_event_receiver, indexer_interface) = indexer::new();
+    let (mut indexer_client, indexer_event_receiver, indexer_interface) = indexer::new();
 
     tokio::spawn(network_interface.run());
     tokio::spawn(indexer_interface.run());
@@ -67,22 +68,43 @@ async fn main() -> Result<(), Box<dyn error::Error>> {
                            network::NetworkEvent::Mdns(MdnsEvent::Discovered(list)) => {
                                 for node in list {
                                     println!("Discovered node with peer id {:?} and multiaddr {:?} ", node.0, node.1);
-                                    client.add_address(node.0, node.1).await.expect("Client fn call dropped");
+                                    network_client.add_address(node.0, node.1).await.expect("Client fn call dropped");
                                 }
                            },
                            network::NetworkEvent::GossipsubMessageRecv(message) => {
                                 match message {
-                                    network::GossipsubMessage::SearchQuery(query) => {
-                                        
+                                    network::GossipsubMessage::NewQuery(query) => {
+                                        // TODO handle error
+                                        let _ = indexer_client.handle_received_query(query).await;
                                     },
                                     _ => {}
                                 }
                            },
-                           network::NetworkEvent::DseMessageRequestRecv {request_id, request, channel} => {
+                           network::NetworkEvent::DseMessageRequestRecv {peer_id, request_id, request} => {
                                 match request {
-                                    network::DseMessageRequest::PlaceBid {query_id, bid} => {
-                                        // ACK the bid
+                                    network::DseMessageRequest::PlaceBid(bid_placed) => {
+                                        // send AckBid response
+                                        // TODO handle case when send dse message
+                                        // response fails.
+                                        let _  = network_client.send_dse_message_response(request_id, network::DseMessageResponse::AckBid(bid_placed.bid.query_id)).await;
+
+                                        // TODO handle in case or err
+                                        let _ = indexer_client.handle_received_bid(indexer::BidReceived::from(bid_placed, peer_id)).await;
                                     },
+                                    network::DseMessageRequest::AcceptBid(query_id) => {
+                                        // send ack
+                                        // TODO handle err
+                                        let _ = network_client.send_dse_message_response(request_id, network::DseMessageResponse::AckAcceptBid(query_id)).await;
+
+                                        let _ = indexer_client.handle_received_bid_acceptance(query_id, peer_id).await;
+                                    },
+                                    network::DseMessageRequest::StartCommit(query_id) => {
+                                        // send ack
+                                        let _ = network_client.send_dse_message_response(request_id, network::DseMessageResponse::AckStartCommit(query_id)).await;
+
+                                        let _ = indexer_client.handle_received_start_commit(query_id, peer_id).await;
+
+                                    }
                                     _ => {}
                                 }
                            },
@@ -91,14 +113,18 @@ async fn main() -> Result<(), Box<dyn error::Error>> {
                     },  
                     None => {}
                 };
-            }
+            },
             event = indexer_event_receiver.recv() => {
                 match event {
                     Some(out) => {
-                        use indexer::IndexerEvent;
+                        // use indexer::IndexerEvent;
                         match out {
-                            IndexerEvent::PlaceBid(bid) => {
-                                match self.network_client.send_dse_message_request()
+                            indexer::IndexerEvent::SendDseMessageRequest{
+                                request,
+                                send_to
+                            } => {   
+                                // TODO handle eerror
+                                let _ = network_client.send_dse_message_request(send_to, request).await;
                             }
                         }
                     },
@@ -108,7 +134,7 @@ async fn main() -> Result<(), Box<dyn error::Error>> {
             line = stdin.next() => {    
                 match line.expect("Line buffer errored") {
                     Ok(l) => {
-                        handle_input(l, &mut client).await;
+                        // handle_input(l, &mut client).await;
                     }
                     Err(e) => {}
                 }
@@ -122,96 +148,98 @@ async fn main() -> Result<(), Box<dyn error::Error>> {
 async fn handle_input(command: String, client: &mut network::Client) {
     let mut args = command.split(" ");
 
-    match args.next() {
-        Some("BOOTSTRAP") => {
-            match client.kad_bootstrap().await {
-                Ok(()) => {
-                    println!("BOOTSTRAP success!");
-                },
-                Err(e) => {
-                    println!("BOOTSTRAP failed with errpr {:?} ", e);
-                }
-            }
-        },
-        Some("PUT") => {
-            let key = {
-                match args.next() {
-                    Some(key) => Key::new(&key),
-                    None => {
-                        eprintln!("PUT record key missing!");
-                        return
-                    }                    
-                }
-            };
-            let value = {
-                match args.next() {
-                    Some(val) => val.into(),
-                    None => {
-                        eprintln!("PUT record value missing!");
-                        return
-                    }                    
-                }
-            };
+    // match args.next() {
+    //     Some("BOOTSTRAP") => {
+    //         match client.kad_bootstrap().await {
+    //             Ok(()) => {
+    //                 println!("BOOTSTRAP success!");
+    //             },
+    //             Err(e) => {
+    //                 println!("BOOTSTRAP failed with errpr {:?} ", e);
+    //             }
+    //         }
+    //     },
+    //     Some("PUT") => {
+    //         let key = {
+    //             match args.next() {
+    //                 Some(key) => Key::new(&key),
+    //                 None => {
+    //                     eprintln!("PUT record key missing!");
+    //                     return
+    //                 }                    
+    //             }
+    //         };
+    //         let value = {
+    //             match args.next() {
+    //                 Some(val) => val.into(),
+    //                 None => {
+    //                     eprintln!("PUT record value missing!");
+    //                     return
+    //                 }                    
+    //             }
+    //         };
             
-            match client.dht_put(Record {
-                key,
-                value,
-                publisher: None,
-                expires: None,
-            }, Quorum::One).await {
-                Ok(put_record) => {
-                    println!("Put record success {:?} ", put_record);
-                }
-                Err(e) => {
-                    println!("Put record failed {:?} ", e);
-                }
-            }
-        },
-        Some("GET") => {
-            let key = {
-                match args.next() {
-                    Some(key) => Key::new(&key),
-                    None => {
-                        eprintln!("GET record key missing");
-                        return
-                    }
-                }
-            };
+    //         match client.dht_put(Record {
+    //             key,
+    //             value,
+    //             publisher: None,
+    //             expires: None,
+    //         }, Quorum::One).await {
+    //             Ok(put_record) => {
+    //                 println!("Put record success {:?} ", put_record);
+    //             }
+    //             Err(e) => {
+    //                 println!("Put record failed {:?} ", e);
+    //             }
+    //         }
+    //     },
+    //     Some("GET") => {
+    //         let key = {
+    //             match args.next() {
+    //                 Some(key) => Key::new(&key),
+    //                 None => {
+    //                     eprintln!("GET record key missing");
+    //                     return
+    //                 }
+    //             }
+    //         };
 
-            match client.dht_get(key, Quorum::One).await {
-                Ok(get_record) => {
-                    println!("Get record success {:?} ", get_record);
-                },
-                Err(e) => {
-                    println!("Get record failed {:?} ", e);
-                }
-            }
-        },
-        Some("PUBLISH") => {
-            let message = {
-                match args.next() {
-                    Some(val) => val,
-                    None =>{
-                        eprintln!("PUBLISH message missing!");
-                        return
-                    }
-                }
-            };
+    //         match client.dht_get(key, Quorum::One).await {
+    //             Ok(get_record) => {
+    //                 println!("Get record success {:?} ", get_record);
+    //             },
+    //             Err(e) => {
+    //                 println!("Get record failed {:?} ", e);
+    //             }
+    //         }
+    //     },
+    //     Some("PUBLISH") => {
+    //         let message = {
+    //             match args.next() {
+    //                 Some(val) => val,
+    //                 None =>{
+    //                     eprintln!("PUBLISH message missing!");
+    //                     return
+    //                 }
+    //             }
+    //         };
 
-            let gossip_message = network::GossipsubMessage::SearchQuery { query: message.to_string(), metadata: message.to_string() };
+    //         let gossip_message = network::GossipsubMessage::SearchQuery { query: message.to_string(), metadata: message.to_string() };
 
-            match client.publish_message(gossip_message).await {
-                Ok(_) => {
-                    println!("Message published!");
-                },
-                Err(e) => {
-                    eprintln!("Message failed to publish with error {:?}!", e);
-                }
-            }
-        }
+    //         match client.publish_message(gossip_message).await {
+    //             Ok(_) => {
+    //                 println!("Message published!");
+    //             },
+    //             Err(e) => {
+    //                 eprintln!("Message failed to publish with error {:?}!", e);
+    //             }
+    //         }
+    //     }
         
-        _ => {
-            println!("Unrecognised command!");
-        }
-    }
+    //     _ => {
+    //         println!("Unrecognised command!");
+    //     }
+    // }
+
+
 }

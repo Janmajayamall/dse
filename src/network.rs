@@ -33,6 +33,7 @@ use std::convert::{TryFrom};
 use serde::{Deserialize, Serialize};
 
 use super::handler;
+use super::indexer;
 
 
 #[derive(NetworkBehaviour)]
@@ -263,10 +264,10 @@ impl Client {
         receiver.await.expect("Client response message dropped")
     }
 
-    pub async fn send_dse_message_response(&mut self, request_id: request_response::RequestId, channel: request_response::ResponseChannel<DseMessageResponse>, response: DseMessageResponse ) -> Result<(), Box<dyn Error + Send>> {
+    pub async fn send_dse_message_response(&mut self, request_id: request_response::RequestId, response: DseMessageResponse ) -> Result<(), Box<dyn Error + Send>> {
         let (sender, receiver) = oneshot::channel();
         self.command_sender.send(
-            Command::SendDseMessageResponse { request_id, channel, response, sender }
+            Command::SendDseMessageResponse { request_id, response, sender }
         ).await.expect("Command message dropped");
         receiver.await.expect("Client response message dropped")
     }
@@ -281,8 +282,14 @@ pub struct NetworkInterface {
     pending_dht_get_requests: HashMap<QueryId, oneshot::Sender<Result<GetRecordOk, GetRecordError>>>,
     pending_add_peers: HashMap<PeerId, oneshot::Sender<Result<(), Box<dyn Error + Send>>>>,
     pending_bootstrap_requests: HashMap<QueryId, oneshot::Sender<Result<(), Box<dyn Error + Send>>>>,
-    pending_dse_message_requests: HashMap<request_response::RequestId, oneshot::Sender<Result<DseMessageResponse, Box<dyn Error + Send>>>>,
-    pending_dse_message_response: HashMap<request_response::RequestId, oneshot::Sender<Result<(), Box<dyn Error + Send>>>>,
+    // Pending result of outbound request. It returns DseMessageResponse
+    // which means the fn does not finishes until peer to which outcound request
+    // is sent, responds using channel or channel drops.
+    pending_dse_outbound_message_requests: HashMap<request_response::RequestId, oneshot::Sender<Result<DseMessageResponse, Box<dyn Error + Send>>>>,
+    // Pending result of response sent to an inbound request
+    pending_dse_inbound_message_response: HashMap<request_response::RequestId, oneshot::Sender<Result<(), Box<dyn Error + Send>>>>,
+    // Stores response channels of an inbound request
+    response_channels_for_inbound_requests: HashMap<request_response::RequestId, request_response::ResponseChannel<DseMessageResponse>>,
     known_peers: HashMap<PeerId, Addresses>,
 }
 
@@ -300,8 +307,9 @@ impl NetworkInterface {
             pending_dht_get_requests: Default::default(),
             pending_add_peers: Default::default(),
             pending_bootstrap_requests: Default::default(),
-            pending_dse_message_requests: Default::default(),
-            pending_dse_message_response: Default::default(),
+            pending_dse_outbound_message_requests: Default::default(),
+            pending_dse_inbound_message_response: Default::default(),
+            response_channels_for_inbound_requests: Default::default(),
             known_peers: Default::default(),
         }
     }
@@ -379,24 +387,35 @@ impl NetworkInterface {
                     }
                 }
             },
-            Command::SendDseMessageResponse { request_id, channel, response, sender } => {  
-                match self.swarm.behaviour_mut().request_response.send_response(channel, response) {
-                    Ok(_) => {
-                        self.pending_dse_message_response.insert(request_id, sender);
-                    }
-                    Err(_) => {
-                        // send_response returns Error, when
-                        // ResponseChannel is already closed
-                        // due to Timeout or Connection Err.
-                        // Thus, we send InboundFailure::Timeout 
-                        // here as the error.
+            Command::SendDseMessageResponse { request_id, response, sender } => {  
+                match self.response_channels_for_inbound_requests.remove(&request_id) { 
+                    Some(channel)=>{
+                          match self.swarm.behaviour_mut().request_response.send_response(channel, response) {
+                            Ok(_) => {
+                                self.pending_dse_inbound_message_response.insert(request_id, sender);
+                            }
+                            Err(_) => {
+                                // send_response returns Error, when
+                                // ResponseChannel is already closed
+                                // due to Timeout or Connection Err.
+                                // Thus, we send InboundFailure::Timeout 
+                                // here as the error.
+                                let _ = sender.send(Err(Box::new(request_response::InboundFailure::Timeout)));
+                            }
+                        }
+                    },
+                    None => {
+                        // FIX: InboundFailure isn't necessary here.
+                        // Replace it with something like 
+                        // "Channel not found".
                         let _ = sender.send(Err(Box::new(request_response::InboundFailure::Timeout)));
                     }
                 }
+              
             }
             Command::SendDseMessageRequest { peer_id, message, sender } => {
                 let request_id = self.swarm.behaviour_mut().request_response.send_request(&peer_id, message);
-                self.pending_dse_message_requests.insert(request_id, sender);
+                self.pending_dse_outbound_message_requests.insert(request_id, sender);
             }
         }
     }
@@ -467,22 +486,23 @@ impl NetworkInterface {
             )) => {
                 match message {
                     RequestResponseMessage::Request { request_id, request, channel} => {
-                       self.network_event_sender.send(NetworkEvent::DseMessageRequestRecv { request_id, request, channel }).await.expect("Network evvent message dropped");
+                       self.response_channels_for_inbound_requests.insert(request_id.clone(), channel);
+                       self.network_event_sender.send(NetworkEvent::DseMessageRequestRecv { peer_id: peer, request_id, request }).await.expect("Network evvent message dropped");
                     },
                     RequestResponseMessage::Response { request_id, response } => {
-                        self.pending_dse_message_requests.remove(&request_id).expect("Outbound Request should be pending!").send(Ok(response));
+                        self.pending_dse_outbound_message_requests.remove(&request_id).expect("Outbound Request should be pending!").send(Ok(response));
                     }
                 }
             },
             SwarmEvent::Behaviour(BehaviourEvent::RequestResponse(
                 RequestResponseEvent::ResponseSent { peer, request_id }
             )) => {
-                self.pending_dse_message_response.remove(&request_id).expect("Outbound Request should be pending!").send(Ok(()));
+                self.pending_dse_inbound_message_response.remove(&request_id).expect("Outbound Request should be pending!").send(Ok(()));
             },
             SwarmEvent::Behaviour(BehaviourEvent::RequestResponse(
                 RequestResponseEvent::OutboundFailure { peer, request_id, error } 
             )) => {
-                self.pending_dse_message_requests.remove(&request_id).expect("Outbound Request should be pending!").send(Err(Box::new(error)));
+                self.pending_dse_outbound_message_requests.remove(&request_id).expect("Outbound Request should be pending!").send(Err(Box::new(error)));
             },
             SwarmEvent::Behaviour(BehaviourEvent::RequestResponse(
                 RequestResponseEvent::InboundFailure { peer, request_id, error } 
@@ -490,7 +510,7 @@ impl NetworkInterface {
                 // RequestResponseEvent::InboundFailure is thrown anytime
                 // (like channel timeout of channel dropped) irrespective 
                 // of whether there was a response initiated by client commands.
-                match self.pending_dse_message_requests.remove(&request_id) {
+                match self.pending_dse_outbound_message_requests.remove(&request_id) {
                     Some(sender) => {sender.send(Err(Box::new(error)));}
                     None => {}
                 }
@@ -558,7 +578,6 @@ pub enum Command {
     },
     SendDseMessageResponse {
         request_id: request_response::RequestId,
-        channel: request_response::ResponseChannel<DseMessageResponse>,
         response: DseMessageResponse,
         sender: oneshot::Sender<Result<(), Box<dyn Error + Send>>>,
     },
@@ -575,16 +594,16 @@ pub enum NetworkEvent {
     GossipsubMessageRecv(GossipsubMessage),
     GossipsubMessageRecvErr(Box<dyn Error + Send>),
     DseMessageRequestRecv {
+        peer_id: PeerId,
         request_id: request_response::RequestId,
         request: DseMessageRequest,
-        channel: request_response::ResponseChannel<DseMessageResponse>,
     },
 }
 
 #[derive(Debug)]
 #[derive(Serialize, Deserialize)]
 pub enum GossipsubMessage {
-    SearchQuery(handler::SearchQuery),
+    NewQuery(indexer::Query),
 }
 
 impl TryFrom<gossipsub::GossipsubMessage> for GossipsubMessage {
@@ -614,22 +633,22 @@ impl GossipsubMessage {
 
 #[derive(Debug)]
 pub enum GossipsubTopic {
-    SearchQuery,
+    Query,
 }
 
 impl GossipsubTopic {
     fn ident_topic(self) -> gossipsub::IdentTopic {
         match self {
-            GossipsubTopic::SearchQuery => {
-                gossipsub::IdentTopic::new("SearchQuery")
+            GossipsubTopic::Query => {
+                gossipsub::IdentTopic::new("Query")
             },
         }
     }
 
     fn from_message(message: &GossipsubMessage) -> Self {
         match message {
-            GossipsubMessage::SearchQuery {..} => {
-                GossipsubTopic::SearchQuery
+            GossipsubMessage::NewQuery {..} => {
+                GossipsubTopic::Query
             }
         }
     }
@@ -638,14 +657,23 @@ impl GossipsubTopic {
 // All stuff related to request response
 #[derive(Deserialize, Serialize, Debug)]
 pub enum DseMessageRequest {
-    PlaceBid(client::Bid),
+    // Place bid for a query
+    PlaceBid(indexer::BidPlaced),
+    // Accept a bid for a query
+    AcceptBid(indexer::QueryId),
+    // Start commit procedure
+    StartCommit(indexer::QueryId),
 }
 
 #[derive(Deserialize, Serialize, Debug)]
 pub enum DseMessageResponse {
-    AckBid(handler::AckBid),
+    // Ack that bid was received
+    AckBid(indexer::QueryId),
+    // Ack that bid acceptance was received
+    AckAcceptBid(indexer::QueryId),
+    // Ack that start commit was received
+    AckStartCommit(indexer::QueryId),
 }
-
 
 #[derive(Debug, Clone)]
 pub struct DseMessageProtocol ();

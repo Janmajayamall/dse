@@ -1,36 +1,82 @@
+use libp2p::{PeerId, request_response::RequestId};
+use serde::{Deserialize, Serialize};
 use tokio::sync::{mpsc, oneshot};
 use tokio::{select};
 
+use super::network;
 
-type QueryId = [u8; 32];
+pub type QueryId = [u8; 32];
 
-#[derive(Debug)]
+#[derive(Deserialize, Serialize, Debug)]
 pub struct Bid {
-    query_id: QueryId,
-    bid: String,
+    pub query_id: QueryId,
+    pub bid: String,
 }
 
-#[derive(Debug)]
-pub struct SearchQuery {
+#[derive(Deserialize, Serialize, Debug)]
+pub struct BidPlaced {
+    // peer id of query requester
+    // to whom this bid is placed
+    pub requester_id: PeerId,
+    pub bid: Bid,
+}
+
+#[derive(Deserialize, Serialize, Debug)]
+pub struct BidReceived {
+    bidder_id: PeerId,
+    query_id: QueryId,
+    bid: Bid,
+}
+
+impl BidReceived {
+    pub fn from(bid_placed: BidPlaced, bidder_id: PeerId) -> Self {
+        Self {
+            bid: bid_placed.bid,
+            query_id: bid_placed.bid.query_id,
+            bidder_id,
+        }
+    }
+}
+
+
+#[derive(Deserialize, Serialize, Debug)]
+pub struct Query {
     id: QueryId,
+    requester_id: PeerId,
     query: String,
     metadata: String,
     expires_at: chrono::DateTime<chrono::Utc>,
 }
 
+
 #[derive(Debug)]
 pub enum Command {
-    HandleReceivedBid(Bid), 
-    HandleReceivedSearchQuery {
-        query: SearchQuery,
+    ReceivedBid{
+        bid_recv: BidReceived,
+        sender: oneshot::Sender<Result<(), anyhow::Error>>,
+    }, 
+    ReceivedQuery {
+        query_recv: Query,
         sender: oneshot::Sender<Result<(), anyhow::Error>>,
     },
+    ReceivedBidAcceptance {
+        query_id: QueryId,
+        peer_id: PeerId,
+        sender: oneshot::Sender<Result<(), anyhow::Error>>,
+    },
+    ReceivedStartCommit {
+        query_id: QueryId,
+        peer_id: PeerId,
+        sender: oneshot::Sender<Result<(), anyhow::Error>>,
+    }
 }
 
 #[derive(Debug)]
 pub enum IndexerEvent {
-    PlaceBid(Bid),
-    NewSearch(SearchQuery),
+    SendDseMessageRequest {
+        request: network::DseMessageRequest,
+        send_to: PeerId,
+    }
 }
 
 
@@ -40,17 +86,34 @@ pub struct Client {
 
 // Client receives commands and forwards them 
 impl Client {
-    pub async fn handle_received_bid() -> Result<(), anyhow::Error> {
-        Ok(())
-    } 
-
-    pub async fn handle_received_query(&mut self, query: SearchQuery) -> Result<(), anyhow::Error> {
+    pub async fn handle_received_bid(&mut self, bid_recv: BidReceived) -> Result<(), anyhow::Error> {
         let (sender, receiver) = oneshot::channel();
         self.command_sender.send(
-            Command::HandleReceivedSearchQuery {
-                query,
-                sender,
-            }
+            Command::ReceivedBid { bid_recv, sender}
+        ).await.expect("Command message dropped");
+        receiver.await.expect("Command response dropped")
+    } 
+
+    pub async fn handle_received_query(&mut self, query_recv: Query) -> Result<(), anyhow::Error> {
+        let (sender, receiver) = oneshot::channel();
+        self.command_sender.send(
+            Command::ReceivedQuery { query_recv, sender }
+        ).await.expect("Command message dropped");
+        receiver.await.expect("Command response dropped")
+    }
+
+    pub async fn handle_received_bid_acceptance(&mut self, query_id: QueryId, peer_id: PeerId) -> Result<(), anyhow::Error> {
+        let (sender, receiver) = oneshot::channel();
+        self.command_sender.send(
+            Command::ReceivedBidAcceptance { query_id, peer_id , sender }
+        ).await.expect("Command message dropped");
+        receiver.await.expect("Command response dropped")
+    }
+
+    pub async fn handle_received_start_commit(&mut self, query_id: QueryId, peer_id: PeerId) -> Result<(), anyhow::Error> {
+        let (sender, receiver) = oneshot::channel();
+        self.command_sender.send(
+            Command::ReceivedStartCommit { query_id, peer_id, sender }
         ).await.expect("Command message dropped");
         receiver.await.expect("Command response dropped")
     }
@@ -90,10 +153,21 @@ impl Indexer {
 
     pub async fn command_handler(&mut self, command: Command) {
         match command {
-            Command::HandleReceivedSearchQuery { query, sender } => {
+            Command::ReceivedBid { bid_recv, sender } => {
                 // TODO something with the query
                 sender.send(Ok(()));
             },
+            Command::ReceivedQuery { query_recv, sender } => {  
+                // TODO something with query 
+                sender.send(Ok(()));
+            },
+            Command::ReceivedBidAcceptance {query_id, peer_id, sender} => {
+                sender.send(Ok(()));
+            },
+            Command::ReceivedStartCommit {query_id, peer_id, sender} => {
+                // notify wallet for commitment
+                sender.send(Ok(()));
+            }
             _ => {}
         }
     }

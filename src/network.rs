@@ -71,7 +71,7 @@ impl Behaviour {
         let mut gossipsub = Gossipsub::new(gossipsub::MessageAuthenticity::Signed(keypair.clone()), gossipsub_config).expect("Gossipsub failed to initialise!");
 
         // by default subcribe to search query topic
-        gossipsub.subscribe(&GossipsubTopic::SearchQuery.ident_topic()).expect("Gossipsub subscription to topic SearchQuery failed!");
+        gossipsub.subscribe(&GossipsubTopic::Query.ident_topic()).expect("Gossipsub subscription to topic SearchQuery failed!");
 
         // request response
         let request_response = RequestResponse::new(DseMessageCodec(), std::iter::once((DseMessageProtocol(), ProtocolSupport::Full)), Default::default());

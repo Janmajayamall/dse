@@ -1,9 +1,12 @@
+use std::collections::HashMap;
+
 use libp2p::{PeerId, request_response::RequestId};
 use serde::{Deserialize, Serialize};
 use tokio::sync::{mpsc, oneshot};
 use tokio::{select};
 
 use super::network;
+use super::server;
 
 pub type QueryId = [u8; 32];
 
@@ -124,17 +127,22 @@ impl Client {
 /// That means sends and receives querues & bids.
 struct Indexer {
     command_receiver: mpsc::Receiver<Command>,
-    event_sender: mpsc::Sender<IndexerEvent>
+    event_sender: mpsc::Sender<IndexerEvent>,
+    server_event_receiver: mpsc::Receiver<server::ServerEvent>,
+    server_client_senders: HashMap<usize, mpsc::UnboundedSender<warp::ws::Message>>,
 }
 
 impl Indexer {
     pub fn new(
         command_receiver: mpsc::Receiver<Command>,
         event_sender: mpsc::Sender<IndexerEvent>,
+        server_event_receiver: mpsc::Receiver<server::ServerEvent>,
     ) -> Self {
         Self {
             command_receiver,
             event_sender,
+            server_event_receiver,
+            server_client_senders: Default::default(),
         }
     }
 
@@ -146,11 +154,18 @@ impl Indexer {
                         Some(c) => self.command_handler(c).await,
                         None => {}
                     }
+                },
+                event = self.server_event_receiver.recv() => {
+                    match event {
+                        Some(e) => self.server_event_handler(e).await,
+                        None => {}
+                    }
                 }
             }
         }
     }
 
+    // TODO convert indexer command messages to websocket messages
     pub async fn command_handler(&mut self, command: Command) {
         match command {
             Command::ReceivedBid { bid_recv, sender } => {
@@ -173,21 +188,32 @@ impl Indexer {
     }
 
     // Indexer events would come from RPC endpoint
-    pub async fn event_handler(&mut self, event: IndexerEvent) {
-        self.event_sender.send(event).await.expect("Indexer event message dropped!");
+    pub async fn server_event_handler(&mut self, event: server::ServerEvent) {
+        use server::ServerEvent;
+        match event {
+            ServerEvent::NewWsClient { client_id, client_sender } => {
+                self.server_client_senders.insert(client_id, client_sender);
+            },
+            ServerEvent::NewWsMessage { client_id, message } => {
+                // TODO handle message
+            }
+        }
+        // self.event_sender.send(event).await.expect("Indexer event message dropped!");
     }
 }
 
-pub fn new() -> (Client, mpsc::Receiver<IndexerEvent>, Indexer) {
+pub fn new() -> (Client, mpsc::Receiver<IndexerEvent>, Indexer, mpsc::Sender<server::ServerEvent>) {
     let (command_sender, command_receiver) = mpsc::channel::<Command>(10);
     let (indexer_event_sender, indexer_event_receiver) = mpsc::channel::<IndexerEvent>(10);
+    let (server_event_sender, server_event_receeiver) = mpsc::channel::<server::ServerEvent>(10);
 
     return (
         Client {
             command_sender,
         },
         indexer_event_receiver,
-        Indexer::new(command_receiver, indexer_event_sender)
+        Indexer::new(command_receiver, indexer_event_sender, server_event_receeiver),
+        server_event_sender
     )
 }
 

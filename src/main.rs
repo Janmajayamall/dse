@@ -37,11 +37,11 @@ async fn main() -> Result<(), Box<dyn error::Error>> {
     let opt = Opt::from_args();
 
     let (mut network_client,mut network_event_receiver, network_interface) = network::new(opt.seed).await.expect("network::new failed");
-    let (mut indexer_client, indexer_event_receiver, indexer_interface) = indexer::new();
+    let (mut indexer_client, indexer_event_receiver, indexer_interface, server_event_sender) = indexer::new();
 
     tokio::spawn(network_interface.run());
     tokio::spawn(indexer_interface.run());
-
+    tokio::spawn(server::new(server_event_sender));
 
     // Listen on either provided opt value or any interface
     if let Some(listen_on) = opt.listen_on {

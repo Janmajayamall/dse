@@ -59,6 +59,8 @@ async fn main() -> Result<(), Box<dyn error::Error>> {
     // read std input
     let mut stdin = async_std::io::BufReader::new(async_std::io::stdin()).lines();
 
+    let node_multiaddress: Option<Multiaddr> = None;
+
     loop {
         select! {
             event = network_event_receiver.recv() => {
@@ -66,6 +68,12 @@ async fn main() -> Result<(), Box<dyn error::Error>> {
                     Some(out) => {
                         // println!("NetworkEvent: received {:?} ", out);
                         match out {
+                           network::NetworkEvent::NewListenAddr {
+                               listener_id,
+                               address
+                           } => {
+                            node_multiaddress = Some(address);
+                           },
                            network::NetworkEvent::Mdns(MdnsEvent::Discovered(list)) => {
                                 for node in list {
                                     println!("Discovered node with peer id {:?} and multiaddr {:?} ", node.0, node.1);
@@ -83,14 +91,14 @@ async fn main() -> Result<(), Box<dyn error::Error>> {
                            },
                            network::NetworkEvent::DseMessageRequestRecv {peer_id, request_id, request} => {
                                 match request {
-                                    network::DseMessageRequest::PlaceBid(bid_placed) => {
+                                    network::DseMessageRequest::PlaceBid(bid) => {
                                         // send AckBid response
                                         // TODO handle case when send dse message
                                         // response fails.
-                                        let _  = network_client.send_dse_message_response(request_id, network::DseMessageResponse::AckBid(bid_placed.bid.query_id)).await;
+                                        let _  = network_client.send_dse_message_response(request_id, network::DseMessageResponse::AckBid(bid.query_id)).await;
 
                                         // TODO handle in case or err
-                                        let _ = indexer_client.handle_received_bid(indexer::BidReceived::from(bid_placed, peer_id)).await;
+                                        let _ = indexer_client.handle_received_bid(indexer::BidReceived::from(bid, peer_id)).await;
                                     },
                                     network::DseMessageRequest::AcceptBid(query_id) => {
                                         // send ack
@@ -126,7 +134,25 @@ async fn main() -> Result<(), Box<dyn error::Error>> {
                             } => {   
                                 // TODO handle eerror
                                 let _ = network_client.send_dse_message_request(send_to, request).await;
-                            }
+                            },
+                            indexer::IndexerEvent::NewQuery {
+                                query
+                            } => {
+
+                            },
+                            indexer::IndexerEvent::RequestNodeMultiAddr{
+                                sender
+                            } => {  
+                                match node_multiaddress {
+                                    Some(add) => {
+                                        sender.send(Ok(add));
+                                    },
+                                    None => {
+                                        sender.send(Err(anyhow::anyhow!("indexer event: Node multi addr does not exist!")));
+                                    },
+                                }
+                            },
+                            _ => {}
                         }
                     },
                     None => {}

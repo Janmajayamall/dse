@@ -3,6 +3,7 @@ use async_std::{self};
 use async_trait::async_trait;
 use async_std::prelude::StreamExt;
 use futures::{AsyncRead, AsyncWrite};
+use libp2p::core::connection::ListenerId;
 use libp2p::core::transport::Boxed;
 use libp2p::kad::record::Key;
 use libp2p::kad::{Quorum, Kademlia, KademliaEvent, QueryId, QueryResult, KademliaConfig, BootstrapError, GetRecordOk, GetRecordError, PutRecordOk, PutRecordError, Record, Addresses};
@@ -139,7 +140,7 @@ impl libp2p::core::Executor for CustomExecutor {
 pub async fn new(
     seed: Option<u8>
 ) -> Result<(Client, mpsc::Receiver<NetworkEvent>, NetworkInterface), Box<dyn Error>> {
-    let keypair = match seed {
+    let keypair =    match seed {
         Some(seed) => {
             let mut bytes = [0u8; 32];
             bytes[0] = seed;
@@ -541,6 +542,7 @@ impl NetworkInterface {
             },
             SwarmEvent::NewListenAddr {listener_id, address} => {
                 println!("swarm: new listener id {:?} and addr {:?} ", listener_id, address);
+                self.network_event_sender.send(NetworkEvent::NewListenAddr { listener_id, address}).await.expect("Network evvent message dropped");
             },
             _ => {}
         }
@@ -598,20 +600,31 @@ pub enum NetworkEvent {
         request_id: request_response::RequestId,
         request: DseMessageRequest,
     },
+    NewListenAddr {
+        listener_id: ListenerId,
+        address: Multiaddr,
+    }
 }
 
 #[derive(Debug)]
 #[derive(Serialize, Deserialize)]
 pub enum GossipsubMessage {
-    NewQuery(indexer::Query),
+    NewQuery(indexer::QueryReceived),
 }
 
 impl TryFrom<gossipsub::GossipsubMessage> for GossipsubMessage {
-    type Error = Box<dyn std::error::Error + Send>;
+    type Error = Box<dyn std::error::Error + Send + Sync>;
     fn try_from(recv_message: gossipsub::GossipsubMessage) -> Result<Self, Self::Error> {
-        match serde_json::from_slice(&recv_message.data) {
-            Ok(v) => Ok(v),
-            Err(e) => Err(Box::new(e))
+        match recv_message.source {
+            Some(peer_id) => {
+                match serde_json::from_slice(&recv_message.data) {
+                    Ok(v) => Ok(v),
+                    Err(e) => Err(Box::new(e))
+                }
+            },
+            None => {
+                Err("gossipsub: Gossipsub message does not contain source peer id".into())
+            }
         }
     }
 }
@@ -658,7 +671,7 @@ impl GossipsubTopic {
 #[derive(Deserialize, Serialize, Debug)]
 pub enum DseMessageRequest {
     // Place bid for a query
-    PlaceBid(indexer::BidPlaced),
+    PlaceBid(indexer::Bid),
     // Accept a bid for a query
     AcceptBid(indexer::QueryId),
     // Start commit procedure

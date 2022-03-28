@@ -49,11 +49,44 @@ Consider service requester node **A** and service provider node **B**.
 4. A select B's bid as the winning bid. A sends "AcceptBid" request to B, after which B sends "AckAcceptBid" response to B.
 5. B checks whether still want to seervice A's query. If yes, B proceeds to (6). If no, interaction stops here and A would choose some other bid after a buffer period.
 6. B sends "StartCommit" request to A, after which A sends "AckStartCommit" response to B.
-7. Commitment of funds necessary for the exchange happens. Once commitment of funds end, A & B receive an event.
+7. Commitment of funds necessary for the exchange happens. Once commitment of funds end, A & B "FundsLocked" event.
 8. B sends "QueryResponse" request to A, after which A sends "AckQueryResponse" response to B.
 9. [Unlocking of funds is still WIP...]
 
+### Commitment types
+
+Type 1:
+**Sign(a - b, e, u, 1, address)**, where a - b is index range, e is epoch number, u is unique id, 1 is type, and address is of address of service requester.
+Funds committed using type 1 will go to address 0 (burned), unless invalidating signature is produced.
+Invalidating signature is - Sign(u) by address. This invalidates the commitment and the indexes can be used for some other commitment. Type 1 commitments are used fo locking funds for the trade.
+
+Type 2:
+**Sign(a - b, e, u, 2, address, recv_address)** where a - b is index range, e is epoch number, u is unique id, 2 is type, and address is of address of service requester.
+Funds committed using type 2 will go to address 0 (burned), unless invalidating signature is produced. Invalidating signature - Sign(u), redirects the funds to recv_address. Type 2 commitments are used for payments.
+
 ### Commitment of Funds
+
+Consider node A (request node) and node B (provider node):
+Node B charges 0.5X, therefore Node A commits X amount and Node B commits 0.5X.
+The commitment happens over 10 rounds, that means in every round both node A and B commit 0.1X.
+Commitment happens the following way -
+
+1. A commits 0.1X as commitment type 1 for first 5 rounds. After which, for the next 5 rounds, A commits 0.1X as commitment type 2.
+2. B commits 0.05X as commitment type 1 for all 10 rounds.
+3. At every commitment round, A or B won't proceed to next round unless they have received & verified validity of expected commitment from the counterparty for the current round.
+4. After receiving a commitment the nodes does the following to verify commitment's validity -
+   For every index in commitment
+    - Node checks whether index has been committed to some other address by sending DHT get query on the network.
+    - DHT query is expected to return a list of addresses (multiaddresses) that claim that the index was committed to them before.
+    - If DHT returns an empty list, node assumes index in the commitment is valid.
+    - If commitment is type 2 and DHT returns a list greater than length 0, node rejects the commitment.
+    - If commitment is type 1 and DHT returns a list greater than length 0, then node sends a "ProvideCommitment" request to all addresses.
+    - The addresses either respond with their respective commitment OR commitment + invalidating signature.
+    - For every commitment received from addresses, node verifies their correctness. Checks whether they are type 1 or 2. If any of them is type 2, node forwards it to all addresses in the list and rejects the initial commitment. Otherwise, node checks whether they have respective invalidating signature and proceeds further.
+    - For the commitments that do not have respective invalidating signatures, node asks counteryparty for invalidating signature.
+    - If counterparty isn't able to provide invalidating signature, node rejects the initial commitment.
+    - If counteryparty provides a invalidating signature, node sends it to the addresses returned in DHT get query.
+    - Node proceeds to check next index.
 
 ### Time locked wallets & commitments
 

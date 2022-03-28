@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 
+use libp2p::Multiaddr;
 use libp2p::{PeerId, request_response::RequestId};
 use serde::{Deserialize, Serialize};
 use tokio::sync::{mpsc, oneshot};
@@ -11,17 +12,23 @@ use super::server;
 pub type QueryId = [u8; 32];
 
 #[derive(Deserialize, Serialize, Debug)]
-pub struct Bid {
-    pub query_id: QueryId,
-    pub bid: String,
+pub struct Query {
+    query: String,
+    expires_at: chrono::DateTime<chrono::Utc>,
 }
 
 #[derive(Deserialize, Serialize, Debug)]
-pub struct BidPlaced {
+pub struct Bid {
+    pub query_id: QueryId,
     // peer id of query requester
     // to whom this bid is placed
     pub requester_id: PeerId,
-    pub bid: Bid,
+    // charge for query in cents
+    pub charge: u32,
+    // commitment for trade
+    pub fund_commitment: u32,
+    // commitment rounds
+    pub commitment_rounds: u32,
 }
 
 #[derive(Deserialize, Serialize, Debug)]
@@ -32,25 +39,27 @@ pub struct BidReceived {
 }
 
 impl BidReceived {
-    pub fn from(bid_placed: BidPlaced, bidder_id: PeerId) -> Self {
+    pub fn from(bid: Bid, bidder_id: PeerId) -> Self {
         Self {
-            bid: bid_placed.bid,
-            query_id: bid_placed.bid.query_id,
+            bid: bid,
+            query_id: bid.query_id,
             bidder_id,
         }
     }
 }
 
-
 #[derive(Deserialize, Serialize, Debug)]
-pub struct Query {
+pub struct QueryReceived {
     id: QueryId,
     requester_id: PeerId,
+    requester_addr: Multiaddr,
     query: String,
-    metadata: String,
     expires_at: chrono::DateTime<chrono::Utc>,
 }
 
+impl QueryReceived {
+    // pub fn from(query: Query, )
+}
 
 #[derive(Debug)]
 pub enum Command {
@@ -59,7 +68,7 @@ pub enum Command {
         sender: oneshot::Sender<Result<(), anyhow::Error>>,
     }, 
     ReceivedQuery {
-        query_recv: Query,
+        query_recv: QueryReceived,
         sender: oneshot::Sender<Result<(), anyhow::Error>>,
     },
     ReceivedBidAcceptance {
@@ -79,7 +88,17 @@ pub enum IndexerEvent {
     SendDseMessageRequest {
         request: network::DseMessageRequest,
         send_to: PeerId,
+    },
+    NewQuery {
+        query: Query,
+    },
+    PlaceBid {
+        bid: Bid,
+    },
+    RequestNodeMultiAddr {
+        sender: oneshot::Sender<Result<Multiaddr, anyhow::Error>>, // TODO change it to channel
     }
+
 }
 
 
@@ -97,7 +116,7 @@ impl Client {
         receiver.await.expect("Command response dropped")
     } 
 
-    pub async fn handle_received_query(&mut self, query_recv: Query) -> Result<(), anyhow::Error> {
+    pub async fn handle_received_query(&mut self, query_recv: QueryReceived) -> Result<(), anyhow::Error> {
         let (sender, receiver) = oneshot::channel();
         self.command_sender.send(
             Command::ReceivedQuery { query_recv, sender }
@@ -187,7 +206,6 @@ impl Indexer {
         }
     }
 
-    // Indexer events would come from RPC endpoint
     pub async fn server_event_handler(&mut self, event: server::ServerEvent) {
         use server::ServerEvent;
         match event {
@@ -196,6 +214,7 @@ impl Indexer {
             },
             ServerEvent::NewWsMessage { client_id, message } => {
                 // TODO handle message
+                // request node id using indexer event of RequestNodeMultiAddr
             }
         }
         // self.event_sender.send(event).await.expect("Indexer event message dropped!");

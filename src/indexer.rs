@@ -231,16 +231,3 @@ pub fn new() -> (Client, mpsc::Receiver<IndexerEvent>, Indexer, mpsc::Sender<ser
         server_event_sender
     )
 }
-
-
-// Note - 
-// processing of queries and bids
-// should run on different 
-// thread (or atleast independent 
-// of other things). Therefore, 
-// a channel is needed for notifying
-// main.
-
-// Node - 
-// Create a dummy indexer that sends
-// queries/bids randomly.

@@ -675,6 +675,12 @@ pub enum CommitRequest {
         query_id: indexer::QueryId,
         round: u32,
     },
+    // Invalidating Signature
+    // Sent by service requester
+    InvalidatingSignature {
+        query_id: indexer::QueryId,
+        invalidating_signature: String,
+    },
     // End commit procedure
     EndCommit(indexer::QueryId),
 }
@@ -687,6 +693,8 @@ pub enum CommitResponse {
         round: u32,
         commitment: String,
     },
+    // Ack InvalidatingSignature
+    AckInvalidatingSignature(indexer::QueryId),
     // Ack End Commit
     AckEndCommit(indexer::QueryId),
 }

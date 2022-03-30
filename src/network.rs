@@ -668,6 +668,29 @@ impl GossipsubTopic {
     }
 }
 
+#[derive(Deserialize, Serialize, Debug)]
+pub enum CommitRequest {
+    // Ask for commitment 
+    CommitFund {
+        query_id: indexer::QueryId,
+        round: u32,
+    },
+    // End commit procedure
+    EndCommit(indexer::QueryId),
+}
+
+#[derive(Deserialize, Serialize, Debug)]
+pub enum CommitResponse {
+    // CommitFund response
+    CommitFund  {
+        query_id: indexer::QueryId,
+        round: u32,
+        commitment: String,
+    },
+    // Ack End Commit
+    AckEndCommit(indexer::QueryId),
+}
+
 // All stuff related to request response
 #[derive(Deserialize, Serialize, Debug)]
 pub enum DseMessageRequest {
@@ -679,13 +702,8 @@ pub enum DseMessageRequest {
     StartCommit(indexer::QueryId),
     // Ask for wallet address
     WalletAddress(indexer::QueryId),
-    // Ask for commitment 
-    CommitFund {
-        query_id: indexer::QueryId,
-        round: u32,
-    },
-    // End commit procedure
-    EndCommit(indexer::QueryId),
+    // Requests related to commit fund
+    Commit(CommitRequest)
 }
 
 #[derive(Deserialize, Serialize, Debug)]
@@ -701,14 +719,8 @@ pub enum DseMessageResponse {
        query_id: indexer::QueryId,
        wallet_address: ethers::types::Address, 
     },
-    // CommitFund response
-    CommitFund  {
-        query_id: indexer::QueryId,
-        round: u32,
-        commitment: String,
-    },
-    // Ack End Commit
-    AckEndCommit(indexer::QueryId),
+    // Respons related to commit fund 
+    Commit(CommitResponse),
 }
 
 #[derive(Debug, Clone)]

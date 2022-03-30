@@ -1,4 +1,5 @@
 use ethers::{types::*};
+use libp2p::{request_response};
 use libp2p::{PeerId, Multiaddr};
 use std::collections::{HashMap, VecDeque};
 use std::str::FromStr;
@@ -10,6 +11,7 @@ use super::network;
 
 
 enum Stage {
+    Unitialised,
     Loaded,
     Rounds,
     Success,
@@ -53,16 +55,35 @@ struct Handler {
     counter_wallet_address: Address,
     commitments_sent: HashMap<u32, String>,
     commitments_received: HashMap<u32, String>,
-    event_sender: mpsc::Sender<CommitmentEvent>,
     stage: Stage,
     network_client: network::Client,
+    event_sender: mpsc::Sender<CommitmentEvent>,
+    command_receiver: mpsc::Receiver<CommitmentEvent>,
 }
 
 impl Handler {
+    pub fn new(
+        request: Request,
+        counter_wallet_address: Address,
+        network_client: network::Client,
+        event_sender: mpsc::Sender<CommitmentEvent>,
+        command_receiver: mpsc::Receiver<CommitmentEvent>,
+    ) -> Self {
+        Self {
+            request,
+            counter_wallet_address,
+            commitments_sent: Default::default(),
+            commitments_received: Default::default(),
+            stage: Stage::Unitialised,
+            network_client,
+            event_sender,
+            command_receiver,
+        }
+    }
+
     pub async fn start(
         mut self,
     ) {
-    
         loop {
             let mut interval = time::interval(time::Duration::from_secs(10));
             interval.tick().await;
@@ -74,7 +95,7 @@ impl Handler {
                     // send round request
                     match self.network_client.send_dse_message_request(self.request.counter_party_peer_id(), network::DseMessageRequest::EndCommit(self.request.query_id())).await {
                         Ok(res) => {
-                            network::DseMessageResponse::AckEndCommit(query_id) {
+                            network::DseMessageResponse::AckEndCommit(query_id) => {
                                 if query_id == self.request.query_id() {
                                   // TODO send end commit event to indexer to proceed further
                                   // Also, advance the state
@@ -116,16 +137,14 @@ impl Handler {
                 }
             }
                 
-                // check what next message to send
-                // find the indexes available (how to find the index?)
+            // check what next message to send
+            // find the indexes available (how to find the index?)
 
-                // get the index
-                // market it as used
-                // sign the message, along with epoch
+            // get the index
+            // market it as used
+            // sign the message, along with epoch
 
-
-                // and then send it
-
+            // and then send it
         }
     }
 
@@ -151,10 +170,20 @@ impl Handler {
     }
 }
 
+
+enum Command {
+    AddRequest(Request),
+    ReceivedRequest{
+        request: network::CommitRequest,
+        request_id: request_response::RequestId,
+    },
+}
+
 struct Commitment {
-    pending_requests: HashMap<indexer::QueryId, Request>,
+    pending_requests: HashMap<indexer::QueryId, mpsc::Sender<Command>>,
     command_receiver: mpsc::Receiver<Command>,
-    event_sender: mpsc::Sender<CommitmentEvent>,
+    // event_sender: mpsc::Sender<CommitmentEvent>,
+    network_client: network::Client,
     unused_indexes: VecDeque<u32>,
     used_indexes: HashMap<indexer::QueryId, Box<[u32]>>,
     index_invalidating_rec: HashMap<u32, String>,
@@ -164,11 +193,13 @@ struct Commitment {
 impl Commitment {
     pub fn new(
         command_receiver: mpsc::Receiver<Command>,
+        network_client: network::Client,
         index_value: U256
     ) -> Self {
         Self {
             pending_requests: Default::default(),
             command_receiver,
+            network_client,
             unused_indexes: Default::default(),
             used_indexes: Default::default(),
             index_invalidating_rec: Default::default(),
@@ -186,16 +217,41 @@ impl Commitment {
 
     pub async fn run(mut self) {
         loop {
-           
             select! {
                 command = self.command_receiver.recv() => {
                     match command {
-                        _ => {}
+                        Some(c) => {
+                            match c {
+                                Command::ReceivedRequest {
+                                    request_id,
+                                    request,
+                                } => {
+                                    match request {
+                                        network::CommitRequest::CommitFund {
+                                            query_id,
+                                            round
+                                        } => {
+                                            
+                                        },
+                                        network::CommitRequest::EndCommit(query_id) => {
+                                            // check whether commit has ended; if yes, then send yes
+
+                                        }
+                                    }
+                                },
+                                Command::AddRequest(request)  => {
+                                    let (sender, receiver) = mpsc::
+                                    request.query_id()
+                                    // 2. open a channel
+
+                                },
+                                _ => {}
+                            }
+                        },
+                        None => {}
                     }
                 },
             }
-            
-           
         }
     }
 

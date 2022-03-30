@@ -121,7 +121,8 @@ async fn main() -> Result<(), Box<dyn error::Error>> {
 
                                         let _ = indexer_client.handle_received_start_commit(query_id, peer_id).await;
 
-                                    }
+                                    },
+                                    
                                     _ => {}
                                 }
                            },

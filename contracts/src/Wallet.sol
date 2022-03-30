@@ -30,6 +30,7 @@ contract Wallet {
      
     constructor(
         uint _epochDuration,
+        // should be 1 * 10 ** 16 (i.e. one cent)
         uint _indexValue,
         uint _securityDeposit,
         address _owner,

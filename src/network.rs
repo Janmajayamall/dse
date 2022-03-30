@@ -33,7 +33,6 @@ use std::collections::{HashMap};
 use std::convert::{TryFrom};
 use serde::{Deserialize, Serialize};
 
-use super::handler;
 use super::indexer;
 
 
@@ -61,6 +60,8 @@ impl Behaviour {
 
         // mdns
         let mdns = Mdns::new(MdnsConfig::default()).await.unwrap();
+
+        
 
         // ping
         let ping_config = PingConfig::new().with_keep_alive(true);
@@ -511,7 +512,7 @@ impl NetworkInterface {
                 // RequestResponseEvent::InboundFailure is thrown anytime
                 // (like channel timeout of channel dropped) irrespective 
                 // of whether there was a response initiated by client commands.
-                match self.pending_dse_outbound_message_requests.remove(&request_id) {
+                match self.pending_dse_inbound_message_response.remove(&request_id) {
                     Some(sender) => {sender.send(Err(Box::new(error)));}
                     None => {}
                 }
@@ -671,11 +672,20 @@ impl GossipsubTopic {
 #[derive(Deserialize, Serialize, Debug)]
 pub enum DseMessageRequest {
     // Place bid for a query
-    PlaceBid(indexer::Bid),
+    PlaceBid(indexer::BidReceived),
     // Accept a bid for a query
     AcceptBid(indexer::QueryId),
     // Start commit procedure
     StartCommit(indexer::QueryId),
+    // Ask for wallet address
+    WalletAddress(indexer::QueryId),
+    // Ask for commitment 
+    CommitFund {
+        query_id: indexer::QueryId,
+        round: u32,
+    },
+    // End commit procedure
+    EndCommit(indexer::QueryId),
 }
 
 #[derive(Deserialize, Serialize, Debug)]
@@ -686,6 +696,19 @@ pub enum DseMessageResponse {
     AckAcceptBid(indexer::QueryId),
     // Ack that start commit was received
     AckStartCommit(indexer::QueryId),
+    // Wallet address response
+    WalletAddress {
+       query_id: indexer::QueryId,
+       wallet_address: ethers::types::Address, 
+    },
+    // CommitFund response
+    CommitFund  {
+        query_id: indexer::QueryId,
+        round: u32,
+        commitment: String,
+    },
+    // Ack End Commit
+    AckEndCommit(indexer::QueryId),
 }
 
 #[derive(Debug, Clone)]

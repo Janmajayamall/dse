@@ -1,7 +1,5 @@
 use std::collections::HashMap;
-
-use libp2p::Multiaddr;
-use libp2p::{PeerId, request_response::RequestId};
+use libp2p::{PeerId, Multiaddr};
 use serde::{Deserialize, Serialize};
 use tokio::sync::{mpsc, oneshot};
 use tokio::{select};
@@ -24,37 +22,35 @@ pub struct Bid {
     // to whom this bid is placed
     pub requester_id: PeerId,
     // charge for query in cents
-    pub charge: u32,
-    // commitment for trade
-    pub fund_commitment: u32,
-    // commitment rounds
-    pub commitment_rounds: u32,
+    pub charge: ethers::types::U256,
 }
 
 #[derive(Deserialize, Serialize, Debug)]
 pub struct BidReceived {
-    bidder_id: PeerId,
-    query_id: QueryId,
-    bid: Bid,
+    pub bidder_id: PeerId,
+    pub bidder_addr: Multiaddr,
+    pub query_id: QueryId,
+    pub bid: Bid,
 }
 
 impl BidReceived {
-    pub fn from(bid: Bid, bidder_id: PeerId) -> Self {
+    pub fn from(bid: Bid, bidder_id: PeerId, bidder_addr: Multiaddr) -> Self {
         Self {
             bid: bid,
             query_id: bid.query_id,
             bidder_id,
+            bidder_addr,
         }
     }
 }
 
 #[derive(Deserialize, Serialize, Debug)]
 pub struct QueryReceived {
-    id: QueryId,
-    requester_id: PeerId,
-    requester_addr: Multiaddr,
-    query: String,
-    expires_at: chrono::DateTime<chrono::Utc>,
+    pub id: QueryId,
+    pub requester_id: PeerId,
+    pub requester_addr: Multiaddr,
+    pub query: String,
+    pub expires_at: chrono::DateTime<chrono::Utc>,
 }
 
 impl QueryReceived {

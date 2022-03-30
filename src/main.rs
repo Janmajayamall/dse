@@ -11,9 +11,10 @@ use std::error;
 use structopt::StructOpt;
 
 mod network;
-mod handler;
 mod indexer;
 mod server;
+mod ethnode;
+mod commitment;
 
 #[derive(Debug, StructOpt)]
 #[structopt(name = "DSE args")]
@@ -28,7 +29,13 @@ struct Opt {
     boot_id: Option<PeerId>,
 
     #[structopt(long)]
-    boot_addr: Option<Multiaddr>
+    boot_addr: Option<Multiaddr>,
+    
+    #[structopt(long)]
+    eth_rpc_endpoint: String,
+    
+    #[structopt(long)]
+    private_key: String,
 }
 
 
@@ -38,6 +45,7 @@ async fn main() -> Result<(), Box<dyn error::Error>> {
 
     let (mut network_client,mut network_event_receiver, network_interface) = network::new(opt.seed).await.expect("network::new failed");
     let (mut indexer_client, indexer_event_receiver, indexer_interface, server_event_sender) = indexer::new();
+    let eth_node = ethnode::EthNode::new(opt.eth_rpc_endpoint, opt.private_key)?;
 
     tokio::spawn(network_interface.run());
     tokio::spawn(indexer_interface.run());
@@ -72,7 +80,7 @@ async fn main() -> Result<(), Box<dyn error::Error>> {
                                listener_id,
                                address
                            } => {
-                            node_multiaddress = Some(address);
+                                node_multiaddress = Some(address);
                            },
                            network::NetworkEvent::Mdns(MdnsEvent::Discovered(list)) => {
                                 for node in list {
@@ -91,14 +99,14 @@ async fn main() -> Result<(), Box<dyn error::Error>> {
                            },
                            network::NetworkEvent::DseMessageRequestRecv {peer_id, request_id, request} => {
                                 match request {
-                                    network::DseMessageRequest::PlaceBid(bid) => {
+                                    network::DseMessageRequest::PlaceBid(bid_recv) => {
                                         // send AckBid response
                                         // TODO handle case when send dse message
                                         // response fails.
-                                        let _  = network_client.send_dse_message_response(request_id, network::DseMessageResponse::AckBid(bid.query_id)).await;
+                                        let _  = network_client.send_dse_message_response(request_id, network::DseMessageResponse::AckBid(bid_recv.query_id)).await;
 
                                         // TODO handle in case or err
-                                        let _ = indexer_client.handle_received_bid(indexer::BidReceived::from(bid, peer_id)).await;
+                                        let _ = indexer_client.handle_received_bid(bid_recv).await;
                                     },
                                     network::DseMessageRequest::AcceptBid(query_id) => {
                                         // send ack

@@ -1,0 +1,156 @@
+[
+	{
+		"type": "function",
+		"name": "createGroupWithSafe",
+		"inputs": [
+			{
+				"internalType": "address",
+				"name": "safe",
+				"type": "address"
+			},
+			{
+				"internalType": "address",
+				"name": "groupSingleton",
+				"type": "address"
+			},
+			{
+				"internalType": "address",
+				"name": "tokenC",
+				"type": "address"
+			},
+			{
+				"internalType": "uint256",
+				"name": "donReservesLimit",
+				"type": "uint256"
+			},
+			{
+				"internalType": "bytes",
+				"name": "groupGlobalConfig",
+				"type": "bytes"
+			}
+		],
+		"outputs": [
+			{
+				"internalType": "contract GroupProxy",
+				"name": "groupProxy",
+				"type": "address"
+			}
+		],
+		"stateMutability": "nonpayable"
+	},
+	{
+		"type": "function",
+		"name": "createSafeAndGroup",
+		"inputs": [
+			{
+				"internalType": "address",
+				"name": "safeProxyFactory",
+				"type": "address"
+			},
+			{
+				"internalType": "address",
+				"name": "safeSingleton",
+				"type": "address"
+			},
+			{
+				"internalType": "address[]",
+				"name": "owners",
+				"type": "address[]"
+			},
+			{
+				"internalType": "uint256",
+				"name": "safeThreshold",
+				"type": "uint256"
+			},
+			{
+				"internalType": "address",
+				"name": "groupSingleton",
+				"type": "address"
+			},
+			{
+				"internalType": "address",
+				"name": "tokenC",
+				"type": "address"
+			},
+			{
+				"internalType": "uint256",
+				"name": "donReservesLimit",
+				"type": "uint256"
+			},
+			{
+				"internalType": "bytes",
+				"name": "groupMarketConfig",
+				"type": "bytes"
+			}
+		],
+		"outputs": [
+			{
+				"internalType": "contract GroupProxy",
+				"name": "groupProxy",
+				"type": "address"
+			}
+		],
+		"stateMutability": "nonpayable"
+	},
+	{
+		"type": "function",
+		"name": "createSafeAndGroupWithSenderAsOwner",
+		"inputs": [
+			{
+				"internalType": "address",
+				"name": "safeProxyFactory",
+				"type": "address"
+			},
+			{
+				"internalType": "address",
+				"name": "safeSingleton",
+				"type": "address"
+			},
+			{
+				"internalType": "uint256",
+				"name": "safeThreshold",
+				"type": "uint256"
+			},
+			{
+				"internalType": "address",
+				"name": "groupSingleton",
+				"type": "address"
+			},
+			{
+				"internalType": "address",
+				"name": "tokenC",
+				"type": "address"
+			},
+			{
+				"internalType": "uint256",
+				"name": "donReservesLimit",
+				"type": "uint256"
+			},
+			{
+				"internalType": "bytes",
+				"name": "groupMarketConfig",
+				"type": "bytes"
+			}
+		],
+		"outputs": [
+			{
+				"internalType": "contract GroupProxy",
+				"name": "groupProxy",
+				"type": "address"
+			}
+		],
+		"stateMutability": "nonpayable"
+	},
+	{
+		"type": "event",
+		"name": "GroupCreated",
+		"inputs": [
+			{
+				"name": "group",
+				"type": "address",
+				"indexed": true
+			}
+		],
+		"anonymous": false
+	}
+]

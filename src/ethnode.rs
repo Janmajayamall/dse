@@ -44,4 +44,8 @@ impl EthNode {
     pub async fn get_current_epoch(&self) {
 
     }
+
+    pub fn signer_address(&self) -> types::Address {
+        self.wallet.address()
+    }
 }

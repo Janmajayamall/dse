@@ -105,17 +105,21 @@ pub enum CommitmentEvent {
 
 #[derive(Debug)]
 pub enum HandlerEvent {
-    // Find a valid index for commitment
+    /// Find a valid index for commitment
     FindCommitmentIndex { 
         query_id: indexer::QueryId,
         sender: oneshot::Sender<Result<u32, anyhow::Error>>,
     },
-    // Add invalidating signature of the query id
+    /// Add invalidating signature of the query id
     AddInvalidatingSignature {
         query_id: indexer::QueryId,
         signature: String,
     },
-
+    /// Notifies commitment received
+    ReceivedCommitment {
+        commitment: Commit,
+        query_id: indexer::QueryId,
+    },
 }
 
 #[derive(Default)]
@@ -136,7 +140,7 @@ struct Handler {
     node: EthNode
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 enum RoundType {
     /// Commitment Type 1
     T1 = 1,
@@ -282,11 +286,26 @@ impl Handler {
                                 }) => {                                        
                                         if query_id == self.request.query_id() {
                                             // TODO check validity on chain and in dht
-                                            // check all params are correct
-                                            // if commitment.
-                                            // check signature is correct
+                                            // TODO check signature validity
 
+                                            // we are checking expected type of commitment in
+                                            // round for the peer, thus we negate is_requester
+                                            if commitment.c_type != self.round_commitment_type(round, !self.request.is_requester) {return;}
+
+                                            if commitment.u != self.request.query_id() {return;}
+                                            if self.request.is_requester == true && commitment.i_address != self.node.signer_address() {return;}                                 
+                                            if self.request.is_requester == false && commitment.i_address != self.peer_wallet.owner_address {return;}                                 
+                                            if commitment.c_type == RoundType::T2 && commitment.r_address != self.node.signer_address() {return;}
+                                         
+                                            // commitment received
                                             self.commitments_received.insert(round, commitment);
+
+                                            // send to parent
+                                            let (sender, receiver) = oneshot::channel::<Result<u32, anyhow::Error>>();
+                                            self.handler_sender.send(
+                                                HandlerEvent::ReceivedCommitment { commitment, query_id }
+                                            ).await;
+                                            receiver.await;
                                         }
                                 },
                                 _ => {}
@@ -404,7 +423,7 @@ impl Handler {
                     epoch: 0,
                     u: self.request.query_id(),
                     c_type: c_type.clone(),
-                    i_address: if self.request.is_requester == true {self.node.timelocked_wallet} else {self.peer_wallet.owner_address},
+                    i_address: if self.request.is_requester == true {self.node.signer_address()} else {self.peer_wallet.owner_address},
                     r_address: match c_type {
                         RoundType::T2 => {
                             self.peer_wallet.owner_address
@@ -635,6 +654,37 @@ impl Commitment {
                 // store the invalidating signature for the query id
                 self.invalidating_signatures.insert(query_id, signature);
             },
+            HandlerEvent::ReceivedCommitment {
+                commitment,
+                query_id, 
+            } => {
+                match commitment.c_type {
+                    RoundType::T1 => {
+                        match self.type1_recv_commitments.get(&query_id) {
+                            Some(vec) => {
+                                vec.push_back(commitment);
+                            },
+                            None => {
+                                let vec: VecDeque<Commit> = VecDeque::new();
+                                vec.push_back(commitment);
+                                self.type1_recv_commitments.insert(query_id, vec);
+                            }
+                        }
+                    },
+                    RoundType::T2 => {
+                        match self.type2_recv_commitments.get(&query_id) {
+                            Some(vec) => {
+                                vec.push_back(commitment);
+                            },
+                            None => {
+                                let vec: VecDeque<Commit> = VecDeque::new();
+                                vec.push_back(commitment);
+                                self.type2_recv_commitments.insert(query_id, vec);
+                            }
+                        }
+                    }
+                }
+            }
         }
     }
 

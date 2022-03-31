@@ -8,7 +8,7 @@ use super::network;
 use super::server;
 use super::commitment;
 
-pub type QueryId = [u8; 32];
+pub type QueryId = u32;
 
 #[derive(Deserialize, Serialize, Debug, Clone)]
 pub struct Query {

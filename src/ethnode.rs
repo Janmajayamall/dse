@@ -1,7 +1,8 @@
 use anyhow::Ok;
-// use ethers::{*};u
 use ethers::prelude::*;
 use std::{sync::Arc, str::FromStr};
+
+use super::commitment;
 
 abigen!(
     WalletContract,
@@ -9,27 +10,23 @@ abigen!(
     event_derives(serde::Deserialize, serde::Serialize),
 );
 
-
+#[derive(Clone)]
 pub struct EthNode {
     client: Arc<Provider<Http>>,
     wallet: LocalWallet,
-    // private key
-    // public key
-
-    // JSON RPC
-
-    // other functions
+    pub timelocked_wallet: types::Address,
 }
 
 impl EthNode {
-    pub fn new(rpc_endpoint: String, private_key: String) -> Result<Self, anyhow::Error> {
+    pub fn new(rpc_endpoint: String, private_key: String, timelocked_wallet: types::Address) -> Result<Self, anyhow::Error> {
         let client = Provider::<Http>::try_from(rpc_endpoint)?;
         let wallet = LocalWallet::from_str(&private_key)?;
         
         Ok(
             Self {
                 client: Arc::new(client),
-                wallet
+                wallet,
+                timelocked_wallet,
             }
         )
     }   
@@ -40,7 +37,11 @@ impl EthNode {
         // println!("EthNode: returned {:?}", value)
     }
 
-    pub async fn sing_message(self) {
-        
+    pub fn sign_commit_message(&self, commit: &commitment::Commit) -> types::Signature {
+        self.wallet.sign_hash(commit.commit_hash(), true)
+    }
+
+    pub async fn get_current_epoch(&self) {
+
     }
 }

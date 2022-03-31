@@ -692,7 +692,7 @@ pub enum CommitResponse {
     CommitFund  {
         query_id: indexer::QueryId,
         round: u32,
-        commitment: String,
+        commitment: commitment::Commit,
     },
     // Ack InvalidatingSignature
     AckInvalidatingSignature(indexer::QueryId),

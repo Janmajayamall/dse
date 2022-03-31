@@ -1,11 +1,13 @@
-use ethers::{types::*};
+use ethers::{types::*, utils::keccak256};
 use libp2p::{request_response};
 use libp2p::{PeerId, Multiaddr};
+use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, VecDeque};
 use std::str::FromStr;
 use tokio::sync::{mpsc, oneshot};
 use tokio::{select, time};
 
+use super::ethnode::EthNode;
 use super::indexer;
 use super::network;
 
@@ -20,6 +22,51 @@ enum Stage {
     WaitingInvalidationSignature,
     // Commit Ended
     CommitEnded
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct Commit { 
+    /// index used for the commitment
+    index: u32,
+    /// epoch during which the commitment is valid
+    epoch: u32,
+    /// unique id that identifies commitment with the
+    /// corresponding query id
+    u: u32,
+    /// commit type 1 or 2
+    c_type: RoundType,
+    /// address that invalidates the commitment
+    i_address: Address,
+    /// address that can redeeem this commitment
+    /// with invalidating signature.
+    /// Only needed for c_type = 2
+    r_address: Address,
+    /// owner's signature on commitment's blob 
+    signature: Option<Signature>,
+}
+
+impl Commit {
+    pub fn commit_hash(&self) -> H256 {
+        let blob: [u8; 1024];
+        U256::from(self.index).to_little_endian(&mut blob[..256]);
+        U256::from(self.epoch).to_little_endian(&mut blob[256..512]);
+        U256::from(self.u).to_little_endian(&mut blob[512..768]);
+        U256::from(self.c_type as u32).to_little_endian(&mut blob[768..1024]);
+
+        let blob: Vec<u8> = Vec::from(blob);
+        
+        blob.extend_from_slice(self.i_address.as_bytes());
+
+        // r_address is added for commitment type 2
+        match self.c_type {
+            RoundType::T2 => {
+                blob.extend_from_slice(self.r_address.as_bytes());
+            },
+            _ => {}
+        }
+        
+        keccak256(blob.as_slice()).into()
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -71,23 +118,30 @@ pub enum HandlerEvent {
 
 }
 
+#[derive(Default)]
+struct PeerWallet {
+    pub wallet_address: Address,
+    pub owner_address: Address
+}
+
 struct Handler {
     request: Request,
-    counter_wallet_address: Address,
-    commitments_sent: HashMap<u32, String>,
-    commitments_received: HashMap<u32, String>,
+    peer_wallet: PeerWallet,
+    commitments_sent: HashMap<u32, Commit>,
+    commitments_received: HashMap<u32, Commit>,
     stage: Stage,
     network_client: network::Client,
     command_receiver: mpsc::Receiver<Command>,
     handler_sender: mpsc::Sender<HandlerEvent>,
+    node: EthNode
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 enum RoundType {
-    // Commitment Type 1
-    T1,
-    // Commitment Type 2
-    T2
+    /// Commitment Type 1
+    T1 = 1,
+    /// Commitment Type 2
+    T2 = 2
 }
 
 impl Handler {
@@ -96,16 +150,18 @@ impl Handler {
         network_client: network::Client,
         command_receiver: mpsc::Receiver<Command>,
         handler_sender: mpsc::Sender<HandlerEvent>,
+        node: EthNode,
     ) -> Self {
         Self {
             request,
-            counter_wallet_address: Address::zero(),
+            peer_wallet: Default::default(),
             commitments_sent: Default::default(),
             commitments_received: Default::default(),
             stage: Stage::Unitialised,
             network_client,
             command_receiver,
             handler_sender,
+            node,
         }
     }
 
@@ -204,7 +260,7 @@ impl Handler {
             let mut interval = time::interval(time::Duration::from_secs(10));
             interval.tick().await;
 
-            if self.counter_wallet_address != Address::default() {
+            if self.peer_wallet.wallet_address != Address::default() && self.peer_wallet.owner_address != Address::default() {
                 // figure out the index to ask for (i.e. round)
                 let round = self.next_expected_round();
                 
@@ -223,12 +279,13 @@ impl Handler {
                                     query_id,
                                     round,
                                     commitment
-                                }) => {
-                                        // TODO 
-                                        // check that the commitment is valid
-                                        // and is of valid type
-                                        
+                                }) => {                                        
                                         if query_id == self.request.query_id() {
+                                            // TODO check validity on chain and in dht
+                                            // check all params are correct
+                                            // if commitment.
+                                            // check signature is correct
+
                                             self.commitments_received.insert(round, commitment);
                                         }
                                 },
@@ -245,7 +302,11 @@ impl Handler {
                         match res {
                             network::DseMessageResponse::WalletAddress { query_id, wallet_address } => {
                                 if query_id == self.request.query_id() {
-                                    self.counter_wallet_address = wallet_address;
+                                    self.peer_wallet = PeerWallet {
+                                        wallet_address,
+                                        // TODO query this from on-chain
+                                        owner_address: Address::default(),
+                                    }
                                 }
                             },
                             _ => {}
@@ -322,7 +383,7 @@ impl Handler {
 
     // Returns commitment of the node 
     // for a given round.
-    async fn find_commitment_for_round(&mut self, round: u32, c_type: RoundType) -> Result<String, anyhow::Error> {
+    async fn find_commitment_for_round(&mut self, round: u32, c_type: RoundType) -> Result<Commit, anyhow::Error> {
         // look whether there already exists 
         // commitment for the round
         match self.commitments_sent.get(&round) {
@@ -337,14 +398,30 @@ impl Handler {
                 ).await?;
                 let index = receiver.await??;
 
-                // TODO create commitment by c_type for the index 
-                let commitment: String = "FakeOne" .into();
-                self.commitments_sent.insert(round, commitment.clone());
-                Ok(commitment)
+                // create commitment by c_type for the index 
+                let mut commit = Commit {
+                    index,
+                    epoch: 0,
+                    u: self.request.query_id(),
+                    c_type: c_type.clone(),
+                    i_address: if self.request.is_requester == true {self.node.timelocked_wallet} else {self.peer_wallet.owner_address},
+                    r_address: match c_type {
+                        RoundType::T2 => {
+                            self.peer_wallet.owner_address
+                        },
+                        _ => {
+                            Address::zero()
+                        }
+                    },
+                    signature: None,
+                };
+                commit.signature = Some(self.node.sign_commit_message(&commit));
+
+                self.commitments_sent.insert(round, commit.clone());
+                Ok(commit)
             }
         }
     }
-
 }
 
 #[derive(Debug)]
@@ -396,28 +473,30 @@ impl Client {
 }
 
 struct Commitment {
-    // Receives commands
+    /// Receives commands
     command_receiver: mpsc::Receiver<Command>,
-    // Network client
+    /// Network client
     network_client: network::Client,
-    // Used for handlers to send events
+    /// Used for handlers to send events
     handler_sender: mpsc::Sender<HandlerEvent>,
-    // Receives events from all handlers
+    /// Receives events from all handlers
     handler_receiver: mpsc::Receiver<HandlerEvent>,
-    // Requests under process
+    /// Requests under process
     pending_requests: HashMap<indexer::QueryId, mpsc::Sender<Command>>,
-    // Indexes not used for commitment
+    /// Indexes not used for commitment
     unused_indexes: VecDeque<u32>,
-    // Indexes used for T1 commitments by query
+    /// Indexes used for T1 commitments by query
     type1_used_indexes: HashMap<indexer::QueryId, VecDeque<u32>>,
-    // Indexes used for T2 commitments by query
+    /// Indexes used for T2 commitments by query
     type2_used_indexes: HashMap<indexer::QueryId, VecDeque<u32>>,
-    // T1 commitmnts received 
-    type1_recv_commitments: HashMap<indexer::QueryId, VecDeque<String>>,
-    // T2 commitments received
-    type2_recv_commitments: HashMap<indexer::QueryId, VecDeque<String>>,
-    // Invalidating signatures by query id
+    /// T1 commitmnts received 
+    type1_recv_commitments: HashMap<indexer::QueryId, VecDeque<Commit>>,
+    /// T2 commitments received
+    type2_recv_commitments: HashMap<indexer::QueryId, VecDeque<Commit>>,
+    /// Invalidating signatures by query id
     invalidating_signatures: HashMap<indexer::QueryId, String>,
+    /// eth node instance
+    node: EthNode,
     // TODO create a struct of commitment that stores the message as well as the signture
     // TODO we haven't taken care of storing invalidating signature history per index
 }
@@ -427,7 +506,8 @@ impl Commitment {
         command_receiver: mpsc::Receiver<Command>,
         network_client: network::Client,
         client: Client,
-        index_value: U256
+        index_value: U256,
+        node: EthNode,
     ) -> Self {
         let (handler_sender, handler_receiver) = mpsc::channel(10);
 
@@ -443,6 +523,7 @@ impl Commitment {
             type1_recv_commitments: Default::default(),
             type2_recv_commitments: Default::default(),
             invalidating_signatures: Default::default(),
+            node,
         }
     }
 
@@ -498,7 +579,7 @@ impl Commitment {
                 let (sender, receiver) = mpsc::channel::<Command>(10);
                 // insert sender for handler to pending requests
                 self.pending_requests.insert(request.query_id().clone(), sender);
-                let handler = Handler::new(request, self.network_client.clone(), receiver, self.handler_sender.clone());
+                let handler = Handler::new(request, self.network_client.clone(), receiver, self.handler_sender.clone(), self.node.clone());
                 tokio::spawn(handler.start());
             },
             Command::ProduceInvalidatingSignature(query_id) => {
@@ -636,3 +717,6 @@ impl Commitment {
 
 // Figure out whether handler or commitment will take care of commitment signature
 // Handler needs to validate & sign
+
+// TODO
+// 1. Add fns for creating signatures and verification

@@ -6,16 +6,17 @@ use tokio::{select};
 
 use super::network;
 use super::server;
+use super::commitment;
 
 pub type QueryId = [u8; 32];
 
-#[derive(Deserialize, Serialize, Debug)]
+#[derive(Deserialize, Serialize, Debug, Clone)]
 pub struct Query {
     query: String,
     expires_at: chrono::DateTime<chrono::Utc>,
 }
 
-#[derive(Deserialize, Serialize, Debug)]
+#[derive(Deserialize, Serialize, Debug, Clone)]
 pub struct Bid {
     pub query_id: QueryId,
     // peer id of query requester
@@ -25,7 +26,7 @@ pub struct Bid {
     pub charge: ethers::types::U256,
 }
 
-#[derive(Deserialize, Serialize, Debug)]
+#[derive(Deserialize, Serialize, Debug, Clone)]
 pub struct BidReceived {
     pub bidder_id: PeerId,
     pub bidder_addr: Multiaddr,
@@ -44,7 +45,7 @@ impl BidReceived {
     }
 }
 
-#[derive(Deserialize, Serialize, Debug)]
+#[derive(Deserialize, Serialize, Debug, Clone)]
 pub struct QueryReceived {
     pub id: QueryId,
     pub requester_id: PeerId,
@@ -97,7 +98,7 @@ pub enum IndexerEvent {
 
 }
 
-
+#[derive(Clone)]
 pub struct Client {
     command_sender: mpsc::Sender<Command>,
 }
@@ -141,10 +142,18 @@ impl Client {
 /// Main interface thru which user interacts.
 /// That means sends and receives querues & bids.
 struct Indexer {
+    // Receives indexer commands
     command_receiver: mpsc::Receiver<Command>,
+    // TODO - I think this is useless
     event_sender: mpsc::Sender<IndexerEvent>,
+    // Receives events from the server
     server_event_receiver: mpsc::Receiver<server::ServerEvent>,
+    // Sends events to server
     server_client_senders: HashMap<usize, mpsc::UnboundedSender<warp::ws::Message>>,
+    // network client
+    network_client: network::Client,
+    // commitment client
+    commitment_client: commitment::Client
 }
 
 impl Indexer {
@@ -152,12 +161,16 @@ impl Indexer {
         command_receiver: mpsc::Receiver<Command>,
         event_sender: mpsc::Sender<IndexerEvent>,
         server_event_receiver: mpsc::Receiver<server::ServerEvent>,
+        network_client: network::Client,
+        commitment_client: commitment::Client
     ) -> Self {
         Self {
             command_receiver,
             event_sender,
             server_event_receiver,
             server_client_senders: Default::default(),
+            network_client,
+            commitment_client,
         }
     }
 
@@ -217,7 +230,10 @@ impl Indexer {
     }
 }
 
-pub fn new() -> (Client, mpsc::Receiver<IndexerEvent>, Indexer, mpsc::Sender<server::ServerEvent>) {
+pub fn new(
+        network_client: network::Client,
+        commitment_client: commitment::Client
+    ) -> (Client, mpsc::Receiver<IndexerEvent>, Indexer, mpsc::Sender<server::ServerEvent>) {
     let (command_sender, command_receiver) = mpsc::channel::<Command>(10);
     let (indexer_event_sender, indexer_event_receiver) = mpsc::channel::<IndexerEvent>(10);
     let (server_event_sender, server_event_receeiver) = mpsc::channel::<server::ServerEvent>(10);
@@ -227,7 +243,13 @@ pub fn new() -> (Client, mpsc::Receiver<IndexerEvent>, Indexer, mpsc::Sender<ser
             command_sender,
         },
         indexer_event_receiver,
-        Indexer::new(command_receiver, indexer_event_sender, server_event_receeiver),
+        Indexer::new(
+            command_receiver, 
+            indexer_event_sender, 
+            server_event_receeiver,
+            network_client,
+            commitment_client,
+        ),
         server_event_sender
     )
 }

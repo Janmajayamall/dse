@@ -202,6 +202,7 @@ pub fn build_transport(identity_keypair: &Keypair) -> io::Result<Boxed<(PeerId, 
 }
 
 // client & event loop for network
+#[derive(Clone)]
 pub struct Client {
     command_sender: mpsc::Sender<Command>,
 }

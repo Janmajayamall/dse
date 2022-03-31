@@ -133,47 +133,47 @@ async fn main() -> Result<(), Box<dyn error::Error>> {
                 };
             },
             event = indexer_event_receiver.recv() => {
-                match event {
-                    Some(out) => {
-                        // use indexer::IndexerEvent;
-                        match out {
-                            indexer::IndexerEvent::SendDseMessageRequest{
-                                request,
-                                send_to
-                            } => {   
-                                // TODO handle eerror
-                                let _ = network_client.send_dse_message_request(send_to, request).await;
-                            },
-                            indexer::IndexerEvent::NewQuery {
-                                query
-                            } => {
+                // match event {
+                //     Some(out) => {
+                //         // use indexer::IndexerEvent;
+                //         match out {
+                //             indexer::IndexerEvent::SendDseMessageRequest{
+                //                 request,
+                //                 send_to
+                //             } => {   
+                //                 // TODO handle eerror
+                //                 let _ = network_client.send_dse_message_request(send_to, request).await;
+                //             },
+                //             indexer::IndexerEvent::NewQuery {
+                //                 query
+                //             } => {
 
-                            },
-                            indexer::IndexerEvent::RequestNodeMultiAddr{
-                                sender
-                            } => {  
-                                match node_multiaddress {
-                                    Some(add) => {
-                                        sender.send(Ok(add));
-                                    },
-                                    None => {
-                                        sender.send(Err(anyhow::anyhow!("indexer event: Node multi addr does not exist!")));
-                                    },
-                                }
-                            },
-                            _ => {}
-                        }
-                    },
-                    None => {}
-                }
+                //             },
+                //             indexer::IndexerEvent::RequestNodeMultiAddr{
+                //                 sender
+                //             } => {  
+                //                 match node_multiaddress {
+                //                     Some(add) => {
+                //                         sender.send(Ok(add));
+                //                     },
+                //                     None => {
+                //                         sender.send(Err(anyhow::anyhow!("indexer event: Node multi addr does not exist!")));
+                //                     },
+                //                 }
+                //             },
+                //             _ => {}
+                //         }
+                //     },
+                //     None => {}
+                // }
             },
             line = stdin.next() => {    
-                match line.expect("Line buffer errored") {
-                    Ok(l) => {
-                        // handle_input(l, &mut client).await;
-                    }
-                    Err(e) => {}
-                }
+                // match line.expect("Line buffer errored") {
+                //     Ok(l) => {
+                //         // handle_input(l, &mut client).await;
+                //     }
+                //     Err(e) => {}
+                // }
             }
         }
     }

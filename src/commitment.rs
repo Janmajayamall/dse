@@ -285,18 +285,26 @@ impl Handler {
                                     commitment
                                 }) => {                                        
                                         if query_id == self.request.query_id() {
-                                            // TODO check validity on chain and in dht
-                                            // TODO check signature validity
+                                            // TODO check validity on chain and in DHT
 
-                                            // we are checking expected type of commitment in
-                                            // round for the peer, thus we negate is_requester
+                                            // TODO check index is valid according to peer's wallet
+
+                                            // TODO check epoch is valid according to peer's wallet
+
+                                            // we are checking type of commitment expected 
+                                            // from the peer for this round, thus we negate is_requester
                                             if commitment.c_type != self.round_commitment_type(round, !self.request.is_requester) {return;}
-
+                                            // u should match query_id
                                             if commitment.u != self.request.query_id() {return;}
+                                            // if self is requester, then i_address should be of self
                                             if self.request.is_requester == true && commitment.i_address != self.node.signer_address() {return;}                                 
+                                            // if self is not requester, then i_address should be of peer
                                             if self.request.is_requester == false && commitment.i_address != self.peer_wallet.owner_address {return;}                                 
+                                            // If commit is of type 2, then r_address should of self.
                                             if commitment.c_type == RoundType::T2 && commitment.r_address != self.node.signer_address() {return;}
-                                         
+                                            // check signature
+
+
                                             // commitment received
                                             self.commitments_received.insert(round, commitment);
 
@@ -660,24 +668,24 @@ impl Commitment {
             } => {
                 match commitment.c_type {
                     RoundType::T1 => {
-                        match self.type1_recv_commitments.get(&query_id) {
+                        match self.type1_recv_commitments.get_mut(&query_id) {
                             Some(vec) => {
                                 vec.push_back(commitment);
                             },
                             None => {
-                                let vec: VecDeque<Commit> = VecDeque::new();
+                                let mut vec: VecDeque<Commit> = VecDeque::new();
                                 vec.push_back(commitment);
                                 self.type1_recv_commitments.insert(query_id, vec);
                             }
                         }
                     },
                     RoundType::T2 => {
-                        match self.type2_recv_commitments.get(&query_id) {
+                        match self.type2_recv_commitments.get_mut(&query_id) {
                             Some(vec) => {
                                 vec.push_back(commitment);
                             },
                             None => {
-                                let vec: VecDeque<Commit> = VecDeque::new();
+                                let mut vec: VecDeque<Commit> = VecDeque::new();
                                 vec.push_back(commitment);
                                 self.type2_recv_commitments.insert(query_id, vec);
                             }

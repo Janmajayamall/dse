@@ -47,7 +47,7 @@ pub struct Commit {
 
 impl Commit {
     pub fn commit_hash(&self) -> H256 {
-        let blob: [u8; 1024];
+        let mut blob: [u8; 1024];
         U256::from(self.index).to_little_endian(&mut blob[..256]);
         U256::from(self.epoch).to_little_endian(&mut blob[256..512]);
         U256::from(self.u).to_little_endian(&mut blob[512..768]);
@@ -65,6 +65,12 @@ impl Commit {
             _ => {}
         }
         
+        keccak256(blob.as_slice()).into()
+    }
+
+    pub fn invalidating_hash(&self) -> H256 {
+        let mut blob: [u8; 256];
+        U256::from(self.u).to_little_endian(&mut blob);
         keccak256(blob.as_slice()).into()
     }
 }
@@ -306,7 +312,7 @@ impl Handler {
 
 
                                             // commitment received
-                                            self.commitments_received.insert(round, commitment);
+                                            self.commitments_received.insert(round, commitment.cloned());
 
                                             // send to parent
                                             let (sender, receiver) = oneshot::channel::<Result<u32, anyhow::Error>>();

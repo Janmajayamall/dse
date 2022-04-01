@@ -85,7 +85,7 @@ async fn main() -> Result<(), Box<dyn error::Error>> {
                            network::NetworkEvent::Mdns(MdnsEvent::Discovered(list)) => {
                                 for node in list {
                                     println!("Discovered node with peer id {:?} and multiaddr {:?} ", node.0, node.1);
-                                    network_client.add_address(node.0, node.1).await.expect("Client fn call dropped");
+                                    network_client.add_kad_peer(node.0, node.1).await.expect("Client fn call dropped");
                                 }
                            },
                            network::NetworkEvent::GossipsubMessageRecv(message) => {

@@ -1,5 +1,3 @@
-use async_std::io::prelude::BufReadExt;
-use async_std::{self};
 use async_trait::async_trait;
 use async_std::prelude::StreamExt;
 use futures::{AsyncRead, AsyncWrite};
@@ -10,7 +8,7 @@ use libp2p::kad::{Quorum, Kademlia, KademliaEvent, QueryId, QueryResult, Kademli
 use libp2p::request_response::{self, RequestResponse, RequestResponseCodec, RequestResponseConfig, RequestResponseEvent, RequestResponseMessage, ProtocolSupport};
 use libp2p::kad::record::store::MemoryStore;
 use libp2p::{NetworkBehaviour, PeerId, Transport, Multiaddr, Swarm};
-use libp2p::swarm::{ SwarmBuilder, SwarmEvent};
+use libp2p::swarm::{ SwarmBuilder, SwarmEvent, ConnectionHandlerUpgrErr};
 use libp2p::identity::{Keypair, secp256k1};
 use libp2p::dns::TokioDnsConfig;
 use libp2p::tcp::TokioTcpConfig;
@@ -34,7 +32,7 @@ use std::convert::{TryFrom};
 use serde::{Deserialize, Serialize};
 
 use super::indexer;
-
+use super::commitment;
 
 #[derive(NetworkBehaviour)]
 #[behaviour(out_event = "BehaviourEvent")]
@@ -60,8 +58,6 @@ impl Behaviour {
 
         // mdns
         let mdns = Mdns::new(MdnsConfig::default()).await.unwrap();
-
-        
 
         // ping
         let ping_config = PingConfig::new().with_keep_alive(true);
@@ -208,10 +204,18 @@ pub struct Client {
 }
 
 impl Client {
-    pub async fn add_address(&mut self, peer_id: PeerId, peer_addr: Multiaddr) ->  Result<(), Box<dyn Error + Send>>{
+    pub async fn add_kad_peer(&mut self, peer_id: PeerId, peer_addr: Multiaddr) ->  Result<(), Box<dyn Error + Send>>{
         let (sender, receiver) = oneshot::channel();
         self.command_sender.send(
-            Command::AddPeer { peer_id, peer_addr, sender }   
+            Command::AddKadPeer { peer_id, peer_addr, sender }   
+        ).await.expect("Command message dropped");
+        receiver.await.expect("Client response message dropped")
+    }
+
+    pub async fn add_request_response_peer(&mut self, peer_id: PeerId, peer_addr: Multiaddr) ->  Result<(), Box<dyn Error + Send>>{
+        let (sender, receiver) = oneshot::channel();
+        self.command_sender.send(
+            Command::AddRequestResponsePeer { peer_id, peer_addr, sender }   
         ).await.expect("Command message dropped");
         receiver.await.expect("Client response message dropped")
     }
@@ -293,6 +297,7 @@ pub struct NetworkInterface {
     pending_dse_inbound_message_response: HashMap<request_response::RequestId, oneshot::Sender<Result<(), Box<dyn Error + Send>>>>,
     // Stores response channels of an inbound request
     response_channels_for_inbound_requests: HashMap<request_response::RequestId, request_response::ResponseChannel<DseMessageResponse>>,
+    // All known peers (FIX: Not needed anymore?)
     known_peers: HashMap<PeerId, Addresses>,
 }
 
@@ -352,8 +357,12 @@ impl NetworkInterface {
                     },
                 };
             },
-            Command::AddPeer { peer_id, peer_addr, sender} => {
+            Command::AddKadPeer { peer_id, peer_addr, sender} => {
                 self.swarm.behaviour_mut().kademlia.add_address(&peer_id, peer_addr);
+                let _ = sender.send(Ok(()));
+            },
+            Command::AddRequestResponsePeer { peer_id, peer_addr, sender} => {
+                self.swarm.behaviour_mut().request_response.add_address(&peer_id, peer_addr);
                 let _ = sender.send(Ok(()));
             },
             Command::DhtPut { record, quorum, sender } => {
@@ -423,7 +432,7 @@ impl NetworkInterface {
         }
     }
 
-    async fn swarm_event_handler(&mut self, event: SwarmEvent<BehaviourEvent, EitherError<EitherError<EitherError<std::io::Error, void::Void>, ping::Failure>, GossipsubHandlerError>>) {
+    async fn swarm_event_handler(&mut self, event: SwarmEvent<BehaviourEvent, EitherError<EitherError<EitherError<EitherError<std::io::Error, void::Void>, ping::Failure>, GossipsubHandlerError>, ConnectionHandlerUpgrErr<std::io::Error>>>) {
         match event {
             SwarmEvent::Behaviour(BehaviourEvent::Mdns(
                 event
@@ -473,7 +482,7 @@ impl NetworkInterface {
                 println!("kad: routing updated with peerId {:?} address {:?} ", peer, addresses);
 
                 // TODO: I haven't taken care of eviction of old peers here
-                self.known_peers.insert(peer, addresses);
+                // self.known_peers.insert(peer, addresses);
             },
             SwarmEvent::Behaviour(BehaviourEvent::Gossipsub(
                 GossipsubEvent::Message {message , ..} 
@@ -558,7 +567,12 @@ pub enum Command {
         addr: Multiaddr,
         sender: oneshot::Sender<Result<(), Box<dyn Error + Send>>>,
     },
-    AddPeer {
+    AddKadPeer {
+        peer_id: PeerId,
+        peer_addr: Multiaddr,
+        sender: oneshot::Sender<Result<(), Box<dyn Error + Send>>>,
+    },
+    AddRequestResponsePeer {
         peer_id: PeerId,
         peer_addr: Multiaddr,
         sender: oneshot::Sender<Result<(), Box<dyn Error + Send>>>,

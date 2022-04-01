@@ -197,10 +197,13 @@ impl Indexer {
     pub async fn command_handler(&mut self, command: Command) {
         match command {
             Command::ReceivedBid { bid_recv, sender } => {
+                self.network_client.add_request_response_peer(bid_recv.bidder_id, bid_recv.bidder_addr).await;
                 // TODO something with the query
                 sender.send(Ok(()));
             },
             Command::ReceivedQuery { query_recv, sender } => {  
+                self.network_client.add_request_response_peer(query_recv.requester_id, query_recv.requester_addr).await;
+
                 // TODO something with query 
                 sender.send(Ok(()));
             },

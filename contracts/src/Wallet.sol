@@ -19,8 +19,8 @@ contract Wallet {
     uint public currentEpoch;
     // Epoch's end time 
     uint public epochExpiresBy;
-    // Wallet's security deposit
-    uint public securityDeposit;
+    // Wallet's reserves in currency
+    uint public reserves;
     // ERC20 token's address used as currency by wallet
     address public currency;
     // Owner of the wallet
@@ -32,6 +32,8 @@ contract Wallet {
     uint immutable public indexValue;
     // Buffer time for burn
     uint immutable public burnBuffer;
+    // funds to be burnt before moving to next epoch
+    uint pendingBurnAmount;
     
     // Buffer time added to burn buffer time
     // of commitments in which owner isn't 
@@ -43,7 +45,7 @@ contract Wallet {
     // burnt, since buffer time is equal irrespective
     // of who is at the advantage of producing invaldating
     // signature.
-    uint constant public invDisadvantageBuffer;
+    uint constant invDisadvantageBuffer = 1 hours;
 
     error BalanceError();
     error NotOwner();
@@ -54,13 +56,13 @@ contract Wallet {
         uint _indexValue,
         address _owner,
         address _currency,
-        uint _bufferTime
+        uint _burnBuffer
     ) {
         epochDuration = _epochDuration;
         indexValue = _indexValue;
         owner = _owner;
         currency = _currency;
-        bufferTime = _bufferTime;
+        burnBuffer = _burnBuffer;
 
         currentEpoch = 1;
         epochExpiresBy = block.timestamp + _epochDuration;
@@ -76,31 +78,56 @@ contract Wallet {
         balance = abi.decode(data, (uint256));
     }
 
+    function burnPendingAmount() internal {
+        uint _pendingAmount = pendingBurnAmount;
+        if (_pendingAmount != 0) {
+            IERC20(currency).transfer(address(0), _pendingAmount);
+            pendingBurnAmount = 0;
+        }
+    }
+
     function isValidCommitment(
         uint256 index,
         uint256 epoch
     ) public view returns (bool isValid) {
         // zero is not a valid index
         if (index == 0) return false;
+
         // not current epoch or epoch expired
         if (
             epoch != currentEpoch ||
             block.timestamp >= epochExpiresBy
         ) return false;
+
+        // check that index for the epoch hasn't been claimed 
+        // nor pending burn
+        bytes32 claimIdentifier = keccak256(abi.encodePacked(index, epoch));
+        if (
+            burnBufferTime[claimIdentifier] != 0 ||
+            claimed[claimIdentifier] == true
+        ) revert();
         
-        // Wallet's active balance = Total Balance - Security Deposit
-        if (index <= ((getBalance(currency) - securityDeposit) / indexValue)){
+        // (balance / indexValue) defines index range
+        // where balance = reserves / 2, since 50%
+        // is used as security deposit
+        if (index <= ((reserves / 2)  / indexValue)){
             return true;
         }
+
         return false;
     }
 
     /// Deposit amount as security deposit for
     /// the wallet. 
-    function deposit() public {
-        uint256 _securityDeposit = securityDeposit;
-        uint256 amount = getBalance(currency) - _securityDeposit;
-        securityDeposit = amount + _securityDeposit;
+    function startEpoch() public {
+        if (block.timestamp < epochExpiresBy) revert EpochOngoing();
+
+        burnPendingAmount();
+
+        reserves = getBalance(currency);
+        currentEpoch += 1;
+        epochExpiresBy = block.timestamp + epochDuration;
+
         // TODO emit event
     }
 
@@ -112,10 +139,12 @@ contract Wallet {
         // cannot withdraw during an active epoch
         if (block.timestamp < epochDuration) revert EpochOngoing();
 
+        burnPendingAmount();
+
         address token = currency;
         IERC20(token).safeTransfer(msg.sender, getBalance(token));
 
-        securityDeposit = 0;
+        reserves = 0;
     }
 
     /// Renews wallet for next epoch
@@ -138,7 +167,7 @@ contract Wallet {
         uint8[] calldata vi,
         bytes32[] calldata ri,
         bytes32[] calldata si,
-        address to,
+        address to
     ) public {
         // sanity checks
         if (block.timestamp > epochExpiresBy) revert();
@@ -150,7 +179,7 @@ contract Wallet {
             v.length != vi.length ||
             v.length != ri.length ||
             v.length != si.length ||
-            v.length != vi.length ||
+            v.length != vi.length
         ) revert();
 
         uint256 _indexValue = indexValue;
@@ -161,16 +190,22 @@ contract Wallet {
         uint256 totalAmount;
 
         for (uint256 i = 0; i < indexes.length; i++) {
+            // check that index for the epoch hasn't been claimed 
+            // nor pending burn
+            bytes32 claimIdentifier = keccak256(abi.encodePacked(indexes[i], _currentEpoch));
+            if (
+                burnBufferTime[claimIdentifier] != 0 ||
+                claimed[claimIdentifier] == true
+            ) revert();
+
             bytes32 commit = keccak256(abi.encodePacked(
                 uint256(indexes[i]), 
-                uint256(epoch), 
+                uint256(_currentEpoch), 
                 uint256(u[i]), 
                 uint256(2), 
                 _owner, 
                 to
             ));
-
-            if (claimed[commit] == true) revert();
 
             // checks that owner signed the commitment
             if (ecrecover(commit, v[i], r[i], s[i]) != _owner) revert();
@@ -179,9 +214,9 @@ contract Wallet {
             bytes32 iCommit = keccak256(abi.encodePacked(u[i]));
             if (ecrecover(iCommit, vi[i], ri[i], si[i]) != _owner) revert();
 
-            totalAmount += _indexValue
+            totalAmount += _indexValue;
 
-            claimed[commit] = true;
+            claimed[claimIdentifier] = true;
         }
 
         IERC20(currency).transfer(to, totalAmount);
@@ -205,10 +240,10 @@ contract Wallet {
         address type2ToAddress,
         uint256 splitIndex
     ) public {
-        uint _bufferTime = bufferTime;
+        uint _burnBuffer = burnBuffer;
 
-        // Can't call burn after epochExpiry - bufferTime - invDisadvantageBuffer.
-        if (block.timestamp >= epochExpiresBy - (_bufferTime + invDisadvantageBuffer)) revert();
+        // Can't call burn after epochExpiry - burnBuffer - invDisadvantageBuffer.
+        if (block.timestamp >= epochExpiresBy - (_burnBuffer + invDisadvantageBuffer)) revert();
 
         // sanity checks
         if (indexes.length != v.length) revert();
@@ -221,15 +256,25 @@ contract Wallet {
         uint256 _indexValue = indexValue;
         uint256 _currentEpoch = currentEpoch;
         address _owner = owner;
+        uint256 totalBurn;
 
         for (uint256 i = 0; i < v.length; i++) {
+            bytes32 claimIdentifier = keccak256(abi.encodePacked(indexes[i], _currentEpoch));
+            // check that index for the epoch hasn't been claimed 
+            // nor pending burn
+            if (
+                burnBufferTime[claimIdentifier] != 0 ||
+                claimed[claimIdentifier] == true
+            ) revert();
+
+
             bytes32 commit;
-            uint256 bTime = _bufferTime;
+            uint256 bTime = _burnBuffer;
             if (i < splitIndex){
                 // type 1 commits
                 commit = keccak256(
                     abi.encodePacked(
-                        uint256(index[i]), 
+                        uint256(indexes[i]), 
                         uint256(_currentEpoch), 
                         uint256(u[i]), 
                         uint256(1), 
@@ -237,12 +282,12 @@ contract Wallet {
                     )
                 );
 
-                burnBufferIAddress[val] = type1IAddress;
+                burnBufferIAddress[claimIdentifier] = type1IAddress;
 
                 // if owner isn't iAddress
                 // add invDisadvantageTime to buffer time
                 if (_owner != type1IAddress){
-                    bTime += invDisadvantageTime;
+                    bTime += invDisadvantageBuffer;
                 }
             }else {
                 // type 2 commit
@@ -250,23 +295,27 @@ contract Wallet {
                 // onwers themselves by default
                 commit = keccak256(
                     abi.encodePacked(
-                        uint256(index[i]), 
+                        uint256(indexes[i]), 
                         uint256(_currentEpoch), 
                         uint256(u[i]),  
                         uint256(2), 
-                        _onwer, 
+                        _owner, 
                         type2ToAddress
                     )
                 );
-                burnBufferIAddress[val] = _owner;
+                burnBufferIAddress[claimIdentifier] = _owner;
             }
 
             // checks that owner signed the commitment
-            if (ecrecover(val, v[i], r[i], s[i]) != _owner) revert();
+            if (ecrecover(commit, v[i], r[i], s[i]) != _owner) revert();
 
-            burnBufferTime[val] = bTime;
-            burnBufferIBlob[val] = keccak256(abi.encodePacked(u[i]));
+            burnBufferTime[claimIdentifier] = bTime;
+            burnBufferIBlob[claimIdentifier] = keccak256(abi.encodePacked(u[i]));
+
+            totalBurn += _indexValue;
         }
+
+        pendingBurnAmount = pendingBurnAmount + totalBurn;
 
         // TODO emit event
     }
@@ -281,25 +330,24 @@ contract Wallet {
         if (commitHash.length != v.length) revert();
         if (
             v.length != r.length || 
-            v.length != s.length ||
+            v.length != s.length
         ) revert();
 
+        uint totalBurn = 0;
+        uint _indexValue = indexValue;
+
         for (uint256 i = 0; i < commitHash.length; i++) {
-            if (burnBufferTime[hashVals[i]] <= block.timestamp) revert();
+            if (burnBufferTime[commitHash[i]] <= block.timestamp) revert();
             if (ecrecover(burnBufferIBlob[commitHash[i]], v[i], r[i], s[i]) != burnBufferIAddress[commitHash[i]]) revert();
 
             // challenge is valid, delete records
             delete burnBufferTime[commitHash[i]];
             delete burnBufferIBlob[commitHash[i]];
-            delete burnBufferIaddress[commitHash[i]];
+            delete burnBufferIAddress[commitHash[i]];
+
+            totalBurn += _indexValue;
         }
+
+        pendingBurnAmount = pendingBurnAmount - totalBurn;
     }
-
-
-    function claimBurnCommits(
-        bytes32[] calldata commitHash
-    ) public {
-
-    }
-
 } 

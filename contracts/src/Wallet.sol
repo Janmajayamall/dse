@@ -63,9 +63,6 @@ contract Wallet {
         owner = _owner;
         currency = _currency;
         burnBuffer = _burnBuffer;
-
-        currentEpoch = 1;
-        epochExpiresBy = block.timestamp + _epochDuration;
     }
 
     function getBalance(
@@ -78,6 +75,9 @@ contract Wallet {
         balance = abi.decode(data, (uint256));
     }
 
+    /// Burns pending burn amount.
+    /// Note don't call this during
+    /// an epoch.
     function burnPendingAmount() internal {
         uint _pendingAmount = pendingBurnAmount;
         if (_pendingAmount != 0) {
@@ -86,10 +86,12 @@ contract Wallet {
         }
     }
 
+    /// Checks whether commit of an index
+    /// in the current epoch valid.
     function isValidCommitment(
         uint256 index,
         uint256 epoch
-    ) public view returns (bool isValid) {
+    ) public view returns (bool) {
         // zero is not a valid index
         if (index == 0) return false;
 
@@ -117,8 +119,7 @@ contract Wallet {
         return false;
     }
 
-    /// Deposit amount as security deposit for
-    /// the wallet. 
+    /// Starts next epoch 
     function startEpoch() public {
         if (block.timestamp < epochExpiresBy) revert EpochOngoing();
 
@@ -147,16 +148,6 @@ contract Wallet {
         reserves = 0;
     }
 
-    /// Renews wallet for next epoch
-    function renew() public {
-        if (block.timestamp < epochDuration) revert EpochOngoing();
-
-        currentEpoch += 1;
-        epochExpiresBy = block.timestamp + epochExpiresBy;
-
-        // TODO emit event
-    }
-
     /// Redeem time-locked commitments of type 2 
     function redeemdType2(
         uint32[] calldata indexes,
@@ -170,7 +161,7 @@ contract Wallet {
         address to
     ) public {
         // sanity checks
-        if (block.timestamp > epochExpiresBy) revert();
+        if (block.timestamp >= epochExpiresBy) revert();
         if (indexes.length != v.length) revert();
         if (
             v.length != u.length ||
@@ -320,6 +311,8 @@ contract Wallet {
         // TODO emit event
     }
 
+    /// Challenge commit in burn buffer 
+    /// by providing invalidating signatures.
     function challengeBurnCommits(
         bytes32[] calldata commitHash,
         uint8[] calldata v,

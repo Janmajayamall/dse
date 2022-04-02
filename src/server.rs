@@ -1,4 +1,5 @@
 use futures_util::{SinkExt, StreamExt, TryFutureExt};
+use log::{error, info, debug};
 use serde::{Deserialize, Serialize};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use tokio::{select, task};
@@ -29,6 +30,12 @@ pub enum ServerEvent {
         client_id: usize,
         message: Message
     },
+    NewQuery {
+        query: indexer::Query 
+    },
+    PlaceBid {
+        bid: indexer::Bid,
+    }
 }
 
 // counter for server client id
@@ -38,14 +45,46 @@ pub async fn new(
     server_event_sender: mpsc::Sender<ServerEvent>,
 
 ) {
-    let main = warp::path!("connect")
+    let ws_sender = server_event_sender.clone();
+    let ws_main = warp::path!("connect")
         .and(warp::ws())
         .map(move |ws: warp::ws::Ws| {
-            let event_sender = server_event_sender.clone(); 
+            let event_sender = ws_sender.clone(); 
             ws.on_upgrade(move |socket| ws_connection_established(socket, event_sender))
         });
+
+    let post_query = warp::post()
+        .and(warp::path("newquery"))
+        // only 16kb of post data
+        .and(warp::body::content_length_limit(1024 * 16))
+        .and(warp::body::json())
+        .and(server_event_sender.clone())
+        .map(move |query: indexer::Query, event_sender | {
+            event_sender.send(
+                ServerEvent::NewQuery {
+                    query,
+                }
+            );
+            warp::reply()
+        });
     
-    // TODO implement REST API for posting queries and stuff
+    let post_bid = warp::post()
+        .and(warp::path("placebid"))
+        // only 16kb of post data
+        .and(warp::body::content_length_limit(1024 * 16))
+        .and(warp::body::json())
+        .and_then()
+        .map(move |bid: indexer::Bid| {
+            let event_sender = server_event_sender.clone();
+            event_sender.send(
+                ServerEvent::PlaceBid {
+                    bid,
+                }
+            );
+            warp::reply()
+        });
+
+    let main = post_bid.or(post_query).or(ws_main);
 
     warp::serve(main).run(([127, 0,0,1], 3000)).await;
 }

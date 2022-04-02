@@ -1,6 +1,7 @@
 use ethers::{types::*, utils::keccak256};
 use libp2p::{request_response};
 use libp2p::{PeerId, Multiaddr};
+use log::{error, debug, info};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, VecDeque, HashSet};
 use std::str::FromStr;
@@ -178,6 +179,7 @@ impl Procedure {
     pub async fn start(
         mut self,
     ) -> Result<(), anyhow::Error>{
+        debug!("commit procedure: procedure start for query_id {:?}", self.request.query_id());
         loop {
             select! {
                 command = self.command_receiver.recv() => {
@@ -195,6 +197,7 @@ impl Procedure {
                                         if query_id == self.request.query_id() && self.is_valid_round_request(round) {
                                             match self.find_commitment_for_round(round, self.round_commitment_type(round, self.request.is_requester)).await {
                                                 Ok(commitment) => {
+                                                    debug!("commit procedure: sending commit {:?} for round {:?} for query_id {:?}", commitment.clone(), round, query_id);
                                                     // send response to the request
                                                     self.network_client.send_dse_message_response(request_id, network::DseMessageResponse::Commit(
                                                         network::CommitResponse::CommitFund {
@@ -220,6 +223,7 @@ impl Procedure {
                                 sender
                             } => {
                                 if query_id == self.request.query_id() {
+                                    debug!("commit procedure: end command received for query {:?}", query_id.clone());
                                     sender.send(Ok((
                                         self.commitments_sent.clone().into_values().collect(),
                                         self.commitments_received.clone().into_values().collect(),
@@ -241,6 +245,8 @@ impl Procedure {
             let mut interval = time::interval(time::Duration::from_secs(10));
             interval.tick().await;
 
+            debug!("commit procedure: time to process commit for query_id {:?}", self.request.query_id());
+
             if self.peer_wallet.wallet_address != Address::default() && self.peer_wallet.owner_address != Address::default() {
                 // figure out the index to ask for (i.e. round)
                 let round = self.next_expected_round();
@@ -256,22 +262,7 @@ impl Procedure {
                     }else {
                         // TODO: notify main to provide service
                     }
-
-                    // ask counter party to end commit
-                    match self.network_client.send_dse_message_request(self.request.counter_party_peer_id() , network::DseMessageRequest::Commit(network::CommitRequest::EndCommit(self.request.query_id()))).await {
-                        Ok(res) => {
-                            match res {
-                                network::DseMessageResponse::Commit(network::CommitResponse::AckEndCommit(query_id)) => {
-                                    if query_id == self.request.query_id() {
-                                        // TODO  end commit
-
-                                    }
-                                },
-                                _ => {}
-                            }
-                        },
-                        Err(_) => {}
-                    }
+                    debug!("commit procedure: all commits have been received for query_id {:?}", self.request.query_id());
                 }else {
                     // send round request
                     match self.network_client.send_dse_message_request(self.request.counter_party_peer_id(), network::DseMessageRequest::Commit(network::CommitRequest::CommitFund { query_id: self.request.query_id(), round} )).await {
@@ -283,6 +274,7 @@ impl Procedure {
                                     commitment
                                 }) => {                                        
                                         if query_id == self.request.query_id() {
+                                            debug!("commit procedure: received commit for query_id {:?} for round {:?}", query_id.clone(), round.clone());
                                             // TODO check validity on chain and in DHT
 
                                             // TODO check index is valid according to peer's wallet
@@ -295,13 +287,13 @@ impl Procedure {
                                                 // from the peer for this round, thus we negate is_requester
                                                 commitment.c_type == self.round_commitment_type(round, !self.request.is_requester) && 
                                                 // u should match query_id
-                                                commitment.u != self.request.query_id() &&
+                                                commitment.u == self.request.query_id() &&
                                                 // if self is requester, then i_address should be of self
-                                                self.request.is_requester == true && commitment.i_address != self.node.signer_address() && 
+                                                self.request.is_requester == true && commitment.i_address == self.node.signer_address() && 
                                                 // if self is not requester, then i_address should be of peer
-                                                self.request.is_requester == false && commitment.i_address != self.peer_wallet.owner_address &&
+                                                self.request.is_requester == false && commitment.i_address == self.peer_wallet.owner_address &&
                                                 // If commit is of type 2, then r_address should of self.
-                                                commitment.c_type == RoundType::T2 && commitment.r_address != self.node.signer_address()
+                                                commitment.c_type == RoundType::T2 && commitment.r_address == self.node.signer_address()
                                             {
                                                 // commitment received
                                                 self.commitments_received.insert(round, commitment.clone());
@@ -321,6 +313,7 @@ impl Procedure {
                         match res {
                             network::DseMessageResponse::WalletAddress { query_id, wallet_address } => {
                                 if query_id == self.request.query_id() {
+                                    debug!("commit procedure: received peer wallet_address {:?} for query_id {:?}", wallet_address.clone(), query_id.clone());
                                     self.peer_wallet = PeerWallet {
                                         wallet_address,
                                         // TODO query this from on-chain
@@ -435,7 +428,7 @@ impl Procedure {
                     signature: None,
                     invalidating_signature: None,
                 };
-                commit.signature = Some(self.node.sign_commit_message(&commit));
+                commit.signature = Some(self.node.sign_message(commit.commit_hash()));
 
                 self.commitments_sent.insert(round, commit.clone());
                 Ok(commit)
@@ -484,6 +477,7 @@ impl Client {
         }
     }
 
+    
     pub async fn start_commit_procedure(&mut self, request: Request) -> Result<(), anyhow::Error> {
         let (sender, receiver) = oneshot::channel();
         self.command_sender.send(
@@ -610,6 +604,8 @@ impl Commitment {
             // Every 20 seconds or so check which commit procedures should be ended
             let mut interval = time::interval(time::Duration::from_secs(20));
             interval.tick().await;
+            
+            debug!("commitment: time to close commit procedures");
 
             let mut remove_set: HashSet<indexer::QueryId> = HashSet::new();
             for (query_id, (request, m_sender)) in self.ongoing_procedures.iter() {
@@ -809,6 +805,33 @@ pub fn new(
 ) -> Commitment {
     Commitment::new(command_receiver, network_client, node)
 }
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 // Progrssive commitment 
 // 1

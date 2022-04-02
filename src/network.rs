@@ -25,6 +25,7 @@ use libp2p::gossipsub::{self, Gossipsub, GossipsubEvent, error::{GossipsubHandle
 use tokio::{select, io};
 use tokio::sync::{mpsc, oneshot};
 use libp2p::noise;
+use log::{info, error, debug};
 use std::error::Error;
 use std::time::Duration;
 use std::collections::{HashMap};
@@ -354,12 +355,14 @@ impl NetworkInterface {
                 };
             },
             Command::AddKadPeer { peer_id, peer_addr, sender} => {
-                self.swarm.behaviour_mut().kademlia.add_address(&peer_id, peer_addr);
+                self.swarm.behaviour_mut().kademlia.add_address(&peer_id, peer_addr.clone());
                 let _ = sender.send(Ok(()));
+                debug!("kad: peer added with peerId {:?} multiAddr {:?}", peer_id, peer_addr);
             },
             Command::AddRequestResponsePeer { peer_id, peer_addr, sender} => {
-                self.swarm.behaviour_mut().request_response.add_address(&peer_id, peer_addr);
+                self.swarm.behaviour_mut().request_response.add_address(&peer_id, peer_addr.clone());
                 let _ = sender.send(Ok(()));
+                debug!("request_response: peer added with peerId {:?} multiAddr {:?}", peer_id, peer_addr);
             },
             Command::DhtPut { record, quorum, sender } => {
                 match self.swarm.behaviour_mut().kademlia.put_record(record.clone(), quorum) {
@@ -386,9 +389,10 @@ impl NetworkInterface {
                 }
             },
             Command::PublishMessage { message, sender} => {
-                match self.swarm.behaviour_mut().gossipsub.publish(message.topic(), message) {
+                match self.swarm.behaviour_mut().gossipsub.publish(message.topic(), message.clone()) {
                     Ok(message_id) => {
                         let _ = sender.send(Ok(message_id));
+                        debug!("gossipsub: published a message {:?}", message);
                     },
                     Err(e) => {
                         let _ = sender.send(Err(Box::new(e)));
@@ -452,7 +456,7 @@ impl NetworkInterface {
                         let _ = self.pending_dht_get_requests.remove(&id).expect("Get Request should be pending!").send(Err(err));
                     },
                     QueryResult::Bootstrap(Ok(record)) => {
-                        println!("kad: Bootstrap with peer id {:?} success; num remaining {:?} ", record.peer, record.num_remaining);
+                        debug!("kad: Bootstrap with peer id {:?} success; num remaining {:?} ", record.peer, record.num_remaining);
                         if record.num_remaining == 0 {
                             let _ = self.pending_bootstrap_requests.remove(&id).expect("Bootstrap request should be pending!").send(Ok(()));
                         }
@@ -462,7 +466,7 @@ impl NetworkInterface {
                             BootstrapError::Timeout {
                                 peer, num_remaining
                             } => {
-                                eprintln!("kad: Bootstrap with peer id {:?} failed; num remaining {:?} ", peer, num_remaining);
+                                error!("kad: Bootstrap with peer id {:?} failed; num remaining {:?} ", peer, num_remaining);
                                 if num_remaining.is_none() || num_remaining.unwrap() == 0 {
                                     let _ = self.pending_bootstrap_requests.remove(&id).expect("Bootstrap request should be pending!").send(Err(Box::new(err)));
                                 }
@@ -475,7 +479,7 @@ impl NetworkInterface {
             SwarmEvent::Behaviour(BehaviourEvent::Kademlia(
                 KademliaEvent::RoutingUpdated { peer, addresses, .. }
             )) => { 
-                println!("kad: routing updated with peerId {:?} address {:?} ", peer, addresses);
+                debug!("kad: routing updated with peerId {:?} address {:?} ", peer, addresses);
 
                 // TODO: I haven't taken care of eviction of old peers here
                 // self.known_peers.insert(peer, addresses);
@@ -483,7 +487,7 @@ impl NetworkInterface {
             SwarmEvent::Behaviour(BehaviourEvent::Gossipsub(
                 GossipsubEvent::Message {message , ..} 
             )) => {
-                println!("gossipsub: Received message {:?} ", message.clone());
+                debug!("gossipsub: Received message {:?} ", message.clone());
                 match GossipsubMessage::try_from(message) {
                     Ok(m) => {self.network_event_sender.send(NetworkEvent::GossipsubMessageRecv(m)).await.expect("Network event message dropped");},
                     Err(e) => {self.network_event_sender.send(NetworkEvent::GossipsubMessageRecvErr(e)).await.expect("Network event message dropped");}
@@ -494,10 +498,12 @@ impl NetworkInterface {
             )) => {
                 match message {
                     RequestResponseMessage::Request { request_id, request, channel} => {
+                       debug!("request_response: Received request {:?} ", request.clone());
                        self.response_channels_for_inbound_requests.insert(request_id.clone(), channel);
                        self.network_event_sender.send(NetworkEvent::DseMessageRequestRecv { peer_id: peer, request_id, request }).await.expect("Network evvent message dropped");
                     },
                     RequestResponseMessage::Response { request_id, response } => {
+                        debug!("request_response: Received response {:?} ", response.clone());
                         self.pending_dse_outbound_message_requests.remove(&request_id).expect("Outbound Request should be pending!").send(Ok(response));
                     }
                 }
@@ -524,10 +530,10 @@ impl NetworkInterface {
                 }
             },
             SwarmEvent::IncomingConnection {local_addr, send_back_addr} => {
-                println!("swarm: incoming connection {:?} {:?} ", local_addr, send_back_addr);
+                debug!("swarm: incoming connection {:?} {:?} ", local_addr, send_back_addr);
             },
             SwarmEvent::ConnectionEstablished {peer_id, endpoint, num_established, ..} => {
-                println!("swarm: connection established {:?} {:?} {:?} ", peer_id, endpoint, num_established);
+                debug!("swarm: connection established {:?} {:?} {:?} ", peer_id, endpoint, num_established);
                 match endpoint {
                     // Not sure whether this is the right practice for populating 
                     // kad dht routing table of a node. 
@@ -545,10 +551,10 @@ impl NetworkInterface {
                 }
             },
             SwarmEvent::ConnectionClosed {peer_id, endpoint, num_established, cause} => {
-                println!("swarm: connection closed {:?} {:?} {:?} {:?} ", peer_id, endpoint, num_established, cause);
+                debug!("swarm: connection closed {:?} {:?} {:?} {:?} ", peer_id, endpoint, num_established, cause);
             },
             SwarmEvent::NewListenAddr {listener_id, address} => {
-                println!("swarm: new listener id {:?} and addr {:?} ", listener_id, address);
+                debug!("swarm: new listener id {:?} and addr {:?} ", listener_id, address);
                 self.network_event_sender.send(NetworkEvent::NewListenAddr { listener_id, address}).await.expect("Network evvent message dropped");
             },
             _ => {}
@@ -618,8 +624,7 @@ pub enum NetworkEvent {
     }
 }
 
-#[derive(Debug)]
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 pub enum GossipsubMessage {
     NewQuery(indexer::QueryReceived),
 }
@@ -650,7 +655,7 @@ impl Into<Vec<u8>> for GossipsubMessage {
     }
 }
 
-impl GossipsubMessage {
+impl GossipsubMessage { 
     fn topic(&self) -> gossipsub::IdentTopic {
         GossipsubTopic::from_message(self).ident_topic()
     }
@@ -679,7 +684,7 @@ impl GossipsubTopic {
     }
 }
 
-#[derive(Deserialize, Serialize, Debug)]
+#[derive(Deserialize, Serialize, Debug, Clone)]
 pub enum CommitRequest {
     // Ask for commitment 
     CommitFund {
@@ -696,7 +701,7 @@ pub enum CommitRequest {
     EndCommit(indexer::QueryId),
 }
 
-#[derive(Deserialize, Serialize, Debug)]
+#[derive(Deserialize, Serialize, Debug, Clone)]
 pub enum CommitResponse {
     // CommitFund response
     CommitFund  {
@@ -711,7 +716,7 @@ pub enum CommitResponse {
 }
 
 // All stuff related to request response
-#[derive(Deserialize, Serialize, Debug)]
+#[derive(Deserialize, Serialize, Debug, Clone)]
 pub enum DseMessageRequest {
     // Place bid for a query
     PlaceBid(indexer::BidReceived),
@@ -725,7 +730,7 @@ pub enum DseMessageRequest {
     Commit(CommitRequest)
 }
 
-#[derive(Deserialize, Serialize, Debug)]
+#[derive(Deserialize, Serialize, Debug, Clone)]
 pub enum DseMessageResponse {
     // Ack that bid was received
     AckBid(indexer::QueryId),

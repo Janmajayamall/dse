@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use libp2p::{PeerId, Multiaddr};
+use log::{debug, error, info};
 use serde::{Deserialize, Serialize};
 use tokio::sync::{mpsc, oneshot};
 use tokio::{select};
@@ -13,7 +14,6 @@ pub type QueryId = u32;
 #[derive(Deserialize, Serialize, Debug, Clone)]
 pub struct Query {
     query: String,
-    expires_at: chrono::DateTime<chrono::Utc>,
 }
 
 #[derive(Deserialize, Serialize, Debug, Clone)]
@@ -196,22 +196,25 @@ impl Indexer {
     pub async fn command_handler(&mut self, command: Command) {
         match command {
             Command::ReceivedBid { bid_recv, sender } => {
-                self.network_client.add_request_response_peer(bid_recv.bidder_id, bid_recv.bidder_addr).await;
+                self.network_client.add_request_response_peer(bid_recv.bidder_id.clone(), bid_recv.bidder_addr.clone()).await;
                 // TODO something with the query
                 sender.send(Ok(()));
+                debug!("indexer: received bid for query_id {:?} from bidder {:?} with addr {:?} ", bid_recv.bid.query_id, bid_recv.bidder_id, bid_recv.bidder_addr);
             },
             Command::ReceivedQuery { query_recv, sender } => {  
-                self.network_client.add_request_response_peer(query_recv.requester_id, query_recv.requester_addr).await;
-
+                self.network_client.add_request_response_peer(query_recv.requester_id.clone(), query_recv.requester_addr.clone()).await;
                 // TODO something with query 
                 sender.send(Ok(()));
+                debug!("indexer: received query with query_id {:?} from requester {:?} with addr {:?} ", query_recv.id, query_recv.requester_id, query_recv.requester_addr);
             },
             Command::ReceivedBidAcceptance {query_id, peer_id, sender} => {
                 sender.send(Ok(()));
+                debug!("indexer: received bid acceptance for query_id {:?} from requester {:?} ", query_id, peer_id);
             },
             Command::ReceivedStartCommit {query_id, peer_id, sender} => {
                 // notify wallet for commitment
                 sender.send(Ok(()));
+                debug!("indexer: received start commit for query_id {:?} from peer {:?} ", query_id, peer_id);
             }
             _ => {}
         }

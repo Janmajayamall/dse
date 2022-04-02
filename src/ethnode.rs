@@ -37,9 +37,6 @@ impl EthNode {
         // println!("EthNode: returned {:?}", value)
     }
 
-    pub fn sign_commit_message(&self, commit: &commitment::Commit) -> types::Signature {
-        self.wallet.sign_hash(commit.commit_hash(), true)
-    }
     
     pub fn sign_message(&self, message: types::H256) -> types::Signature {
         self.wallet.sign_hash(message, true)

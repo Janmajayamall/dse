@@ -49,13 +49,13 @@ pub struct Commit {
 
 impl Commit {
     pub fn commit_hash(&self) -> H256 {
-        let mut blob: [u8; 1024];
+        let mut blob: [u8; 1024] = [0; 1024];
         U256::from(self.index).to_little_endian(&mut blob[..256]);
         U256::from(self.epoch).to_little_endian(&mut blob[256..512]);
-        U256::from(self.u).to_little_endian(&mut blob[512..768]);
-        U256::from(self.c_type as u32).to_little_endian(&mut blob[768..1024]);
+        U256::from(self.u.clone()).to_little_endian(&mut blob[512..768]);
+        U256::from(self.c_type.clone() as u32).to_little_endian(&mut blob[768..1024]);
 
-        let blob: Vec<u8> = Vec::from(blob);
+        let mut blob: Vec<u8> = Vec::from(blob);
         
         blob.extend_from_slice(self.i_address.as_bytes());
 
@@ -69,20 +69,10 @@ impl Commit {
         
         keccak256(blob.as_slice()).into()
     }
-
-    pub fn add_invalidating_signature(&self, invalidating_signature: Signature) -> Result<(), anyhow::Error> {
-        let mut blob: [u8; 256];
-        U256::from(self.u).to_little_endian(&mut blob);
-        let i_hash: H256 = keccak256(blob.as_slice()).into();
-
-        // check signature
-
-        Ok(())
-    }
 }
 
 #[derive(Debug, Clone)]
-struct Request {  
+pub struct Request {  
     is_requester: bool,
     bid: indexer::BidReceived,
     query: indexer::QueryReceived,
@@ -98,9 +88,9 @@ impl Request {
 
     fn counter_party_multiaddress(&self) -> Multiaddr {
         if self.is_requester == true {
-            return self.bid.bidder_addr;
+            return self.bid.bidder_addr.clone();
         };
-        return self.query.requester_addr;
+        return self.query.requester_addr.clone();
     }
 
     fn query_id(&self) -> indexer::QueryId {
@@ -108,12 +98,6 @@ impl Request {
     }
 }
 
-pub enum CommitmentEvent {
-    SendDseMessageRequest {
-        request: network::DseMessageRequest,
-        send_to: PeerId,
-    },
-}
 
 #[derive(Debug)]
 pub enum ProcedureRequest {
@@ -461,24 +445,34 @@ impl Procedure {
 }
 
 #[derive(Debug)]
-enum Command {
+pub enum Command {
     /// Process new request in new handler
-    StartCommitProcedure(Request),
+    StartCommitProcedure {
+        request: Request,
+        sender: oneshot::Sender<Result<(), anyhow::Error>>,
+    },
     /// Received a request over network
     ReceivedRequest{
         request: network::CommitRequest,
         request_id: request_response::RequestId,
+        sender: oneshot::Sender<Result<(), anyhow::Error>>,
     },
     /// Produces invalidting signature (used by service requester)
-    ProduceInvalidatingSignature(indexer::QueryId),
+    ProduceInvalidatingSignature {
+        query_id: indexer::QueryId,
+        sender: oneshot::Sender<Result<(), anyhow::Error>>,
+    },
     /// End commit procedure for a query id.
     /// Used for ending commit procedure by force
-    ForceEndCommit(indexer::QueryId),
+    ForceEndCommit {
+        query_id: indexer::QueryId,
+        sender: oneshot::Sender<Result<(), anyhow::Error>>,
+    },
 }
 
 #[derive(Clone)]
 pub struct Client {
-    command_sender: mpsc::Sender<Command>,
+    pub command_sender: mpsc::Sender<Command>,
 }   
 
 impl Client {
@@ -490,20 +484,54 @@ impl Client {
         }
     }
 
-    pub fn handle_add_request() {
-
-    }
-
-    pub async fn handle_produce_invalidating_signature(&mut self, query_id: indexer::QueryId) -> Result<String, anyhow::Error> {
-        let (sender, receiver) = oneshot::channel();    
+    pub async fn start_commit_procedure(&mut self, request: Request) -> Result<(), anyhow::Error> {
+        let (sender, receiver) = oneshot::channel();
         self.command_sender.send(
-            Command::ProduceInvalidatingSignature(query_id)
-        ).await.expect("commitments: Command sender message dropped");
-        receiver.await.expect("commitments: Response message dropped")
+            Command::StartCommitProcedure {
+                request,
+                sender
+            }
+        ).await.expect("Command message dropped");
+        receiver.await.expect("Client response dropped")
     }
+
+    pub async fn handle_received_request(&mut self, request: network::CommitRequest, request_id: request_response::RequestId ) -> Result<(), anyhow::Error> {
+        let (sender, receiver) = oneshot::channel();
+        self.command_sender.send(
+            Command::ReceivedRequest {
+                request,
+                request_id,
+                sender
+            }
+        ).await.expect("Command message dropped");
+        receiver.await.expect("Client response dropped")
+    }
+
+    pub async fn produce_invalidating_signature(&mut self, query_id: indexer::QueryId) -> Result<(), anyhow::Error> {
+        let (sender, receiver) = oneshot::channel();
+        self.command_sender.send(
+            Command::ProduceInvalidatingSignature {
+                query_id,
+                sender
+            }
+        ).await.expect("Command message dropped");
+        receiver.await.expect("Client response dropped")
+    }
+
+    pub async fn force_end_commit_procedure(&mut self, query_id: indexer::QueryId) -> Result<(), anyhow::Error> {
+        let (sender, receiver) = oneshot::channel();
+        self.command_sender.send(
+            Command::ForceEndCommit {
+                query_id,
+                sender
+            }
+        ).await.expect("Command message dropped");
+        receiver.await.expect("Client response dropped")
+    }
+
 }
 
-struct Commitment {
+pub struct Commitment {
     /// Receives commands
     command_receiver: mpsc::Receiver<Command>,
     /// Network client
@@ -535,8 +563,6 @@ impl Commitment {
     pub fn new(
         command_receiver: mpsc::Receiver<Command>,
         network_client: network::Client,
-        client: Client,
-        index_value: U256,
         node: EthNode,
     ) -> Self {
         let (procedure_request_sender, procedure_request_receiver) = mpsc::channel(10);
@@ -564,7 +590,7 @@ impl Commitment {
         };
     }
 
-    pub async fn run(&mut self) {
+    pub async fn run(mut self) {
         loop {
             select! {
                 command = self.command_receiver.recv() => {
@@ -645,6 +671,7 @@ impl Commitment {
             Command::ReceivedRequest {
                 request_id,
                 request,
+                sender
             } => {
                 match request {
                     // Recevied invalidting signature from service requester
@@ -687,18 +714,28 @@ impl Commitment {
                     },
                     _ => {}
                 }
+
+                sender.send(Ok(()));
             },
-            Command::StartCommitProcedure(request)  => {
+            Command::StartCommitProcedure {
+                request,
+                sender
+            }  => {
                 // create new handler
-                let (sender, receiver) = mpsc::channel::<ProcedureCommand>(10);
+                let (p_sender, p_receiver) = mpsc::channel::<ProcedureCommand>(10);
                 // insert sender for procedure to pending requests
-                self.ongoing_procedures.insert(request.query_id().clone(), (request.clone(), sender));
-                let procedure = Procedure::new(request, self.network_client.clone(), receiver, self.procedure_request_sender.clone(), self.node.clone());
+                self.ongoing_procedures.insert(request.query_id().clone(), (request.clone(), p_sender));
+                let procedure = Procedure::new(request, self.network_client.clone(), p_receiver, self.procedure_request_sender.clone(), self.node.clone());
                 tokio::spawn(procedure.start());
+
+                sender.send(Ok(()));
             },
-            Command::ProduceInvalidatingSignature(query_id) => {
+            Command::ProduceInvalidatingSignature {
+                query_id,
+                sender
+            } => {
                 match self.ongoing_procedures.get(&query_id) {
-                    Some((request, sender)) => {
+                    Some((request, _)) => {
                         // can produce invalidating singature only when self is requester
                         if request.is_requester {
                             let mut q_id: [u8; 256] = [0; 256];
@@ -709,9 +746,14 @@ impl Commitment {
                     },
                     None => {}
                 }
+                sender.send(Ok(()));
             },
-            Command::ForceEndCommit(query_id) => {
-                
+            Command::ForceEndCommit {
+                query_id,
+                sender
+            } => {
+                // TODO handle this
+                sender.send(Ok(()));
             },
             _ => {}
         }
@@ -757,8 +799,16 @@ impl Commitment {
     //     };
     //     None
     // }
+
 }
 
+pub fn new(
+    command_receiver: mpsc::Receiver<Command>,
+    network_client: network::Client,
+    node: EthNode
+) -> Commitment {
+    Commitment::new(command_receiver, network_client, node)
+}
 
 // Progrssive commitment 
 // 1

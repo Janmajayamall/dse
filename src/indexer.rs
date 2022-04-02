@@ -37,7 +37,7 @@ pub struct BidReceived {
 impl BidReceived {
     pub fn from(bid: Bid, bidder_id: PeerId, bidder_addr: Multiaddr) -> Self {
         Self {
-            bid: bid,
+            bid: bid.clone(),
             query_id: bid.query_id,
             bidder_id,
             bidder_addr,
@@ -95,12 +95,11 @@ pub enum IndexerEvent {
     RequestNodeMultiAddr {
         sender: oneshot::Sender<Result<Multiaddr, anyhow::Error>>, // TODO change it to channel
     }
-
 }
 
 #[derive(Clone)]
 pub struct Client {
-    command_sender: mpsc::Sender<Command>,
+    pub command_sender: mpsc::Sender<Command>,
 }
 
 // Client receives commands and forwards them 
@@ -141,7 +140,7 @@ impl Client {
 
 /// Main interface thru which user interacts.
 /// That means sends and receives querues & bids.
-struct Indexer {
+pub struct Indexer {
     /// Receives indexer commands
     command_receiver: mpsc::Receiver<Command>,
     /// FIX - I think this is useless
@@ -235,16 +234,14 @@ impl Indexer {
 
 pub fn new(
         network_client: network::Client,
-        commitment_client: commitment::Client
-    ) -> (Client, mpsc::Receiver<IndexerEvent>, Indexer, mpsc::Sender<server::ServerEvent>) {
-    let (command_sender, command_receiver) = mpsc::channel::<Command>(10);
+        commitment_client: commitment::Client,
+        command_receiver: mpsc::Receiver<Command>
+    ) -> (mpsc::Receiver<IndexerEvent>, Indexer, mpsc::Sender<server::ServerEvent>) {
+
     let (indexer_event_sender, indexer_event_receiver) = mpsc::channel::<IndexerEvent>(10);
     let (server_event_sender, server_event_receeiver) = mpsc::channel::<server::ServerEvent>(10);
 
     return (
-        Client {
-            command_sender,
-        },
         indexer_event_receiver,
         Indexer::new(
             command_receiver, 

@@ -36,7 +36,7 @@ use super::commitment;
 
 #[derive(NetworkBehaviour)]
 #[behaviour(out_event = "BehaviourEvent")]
-pub struct Behaviour {
+struct Behaviour {
     kademlia: Kademlia<MemoryStore>,
     mdns: Mdns,
     ping: Ping,
@@ -132,12 +132,13 @@ impl libp2p::core::Executor for CustomExecutor {
     }
 }
 
-/// Creates the client + network interface. Also
+/// Creates a new network interface. Also
 /// sets up network event stream
 pub async fn new(
-    seed: Option<u8>
-) -> Result<(Client, mpsc::Receiver<NetworkEvent>, NetworkInterface), Box<dyn Error>> {
-    let keypair =    match seed {
+    seed: Option<u8>,
+    command_receiver: mpsc::Receiver<Command>
+) -> Result<(mpsc::Receiver<NetworkEvent>, NetworkInterface), Box<dyn Error>> {
+    let keypair = match seed {
         Some(seed) => {
             let mut bytes = [0u8; 32];
             bytes[0] = seed;
@@ -160,17 +161,12 @@ pub async fn new(
         Box::new(CustomExecutor)
     }).build();
 
-    let (command_sender, command_receiver) = mpsc::channel::<Command>(10);
     let (network_event_sender, network_event_receiver) = mpsc::channel::<NetworkEvent>(10);
 
     // network interface
     let network_interface = NetworkInterface::new(swarm, command_receiver, network_event_sender);
-    let client = Client {
-        command_sender,
-    };
 
     Ok((
-        client,
         network_event_receiver,
         network_interface,
     ))
@@ -200,7 +196,7 @@ pub fn build_transport(identity_keypair: &Keypair) -> io::Result<Boxed<(PeerId, 
 // client & event loop for network
 #[derive(Clone)]
 pub struct Client {
-    command_sender: mpsc::Sender<Command>,
+    pub command_sender: mpsc::Sender<Command>,
 }
 
 impl Client {
@@ -302,7 +298,7 @@ pub struct NetworkInterface {
 }
 
 impl NetworkInterface {
-    pub fn new(
+    fn new(
         swarm: Swarm<Behaviour>,
         command_receiver: mpsc::Receiver<Command>,
         network_event_sender: mpsc::Sender<NetworkEvent>,

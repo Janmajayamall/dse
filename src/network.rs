@@ -4,8 +4,8 @@ use futures::{AsyncRead, AsyncWrite};
 use libp2p::core::connection::ListenerId;
 use libp2p::core::transport::Boxed;
 use libp2p::kad::record::Key;
-use libp2p::kad::{Quorum, Kademlia, KademliaEvent, QueryId, QueryResult, KademliaConfig, BootstrapError, GetRecordOk, GetRecordError, PutRecordOk, PutRecordError, Record, Addresses};
-use libp2p::request_response::{self, RequestResponse, RequestResponseCodec, RequestResponseConfig, RequestResponseEvent, RequestResponseMessage, ProtocolSupport};
+use libp2p::kad::{Quorum, Kademlia, KademliaEvent, QueryId, QueryResult, KademliaConfig, BootstrapError, GetRecordOk, GetRecordError, PutRecordOk, Record, Addresses};
+use libp2p::request_response::{self, RequestResponse, RequestResponseCodec, RequestResponseEvent, RequestResponseMessage, ProtocolSupport};
 use libp2p::kad::record::store::MemoryStore;
 use libp2p::{NetworkBehaviour, PeerId, Transport, Multiaddr, Swarm};
 use libp2p::swarm::{ SwarmBuilder, SwarmEvent, ConnectionHandlerUpgrErr};
@@ -694,7 +694,7 @@ pub enum CommitRequest {
     // Sent by service requester
     InvalidatingSignature {
         query_id: indexer::QueryId,
-        invalidating_signature: String,
+        invalidating_signature: ethers::types::Signature,
     },
     // End commit procedure
     EndCommit(indexer::QueryId),

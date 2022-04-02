@@ -1,5 +1,4 @@
 use futures_util::{SinkExt, StreamExt, TryFutureExt};
-use libp2p::{PeerId};
 use serde::{Deserialize, Serialize};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use tokio::{select, task};

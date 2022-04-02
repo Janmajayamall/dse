@@ -4,7 +4,7 @@ use async_std::prelude::StreamExt;
 use libp2p::kad::record::Key;
 use libp2p::kad::{Quorum, Record};
 use libp2p::{PeerId, Multiaddr};
-use libp2p::mdns::{ MdnsEvent};
+use libp2p::mdns::{MdnsEvent};
 use libp2p::gossipsub::{self};
 use tokio::{select};
 use std::error;
@@ -61,7 +61,7 @@ async fn main() -> Result<(), Box<dyn error::Error>> {
     // add bootnode
     if let (Some(boot_id),  Some(boot_addr)) = (opt.boot_id, opt.boot_addr) {
         println!("Bootnode peerId {:?} multiAddr {:?} ", boot_id, boot_addr);
-        let _ = network_client.add_address(boot_id, boot_addr).await;
+        let _ = network_client.add_kad_peer(boot_id, boot_addr).await;
     }
 
     // read std input

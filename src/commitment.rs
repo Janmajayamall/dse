@@ -2,7 +2,7 @@ use ethers::{types::*, utils::keccak256};
 use libp2p::{request_response};
 use libp2p::{PeerId, Multiaddr};
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, VecDeque, HashSet};
 use std::str::FromStr;
 use tokio::sync::{mpsc, oneshot};
 use tokio::{select, time};
@@ -12,15 +12,15 @@ use super::indexer;
 use super::network;
 
 enum Stage {
-    // Waiting for countr party wallet address
+    /// Waiting for countr party wallet address
     Unitialised,
-    // Commit rounds going on
+    /// Commit rounds going on
     Commit,
-    // Waiting for service to go through
+    /// Waiting for service to go through
     WaitingForService,
-    // Waiting for invalidation signature
+    /// Waiting for invalidation signature
     WaitingInvalidationSignature,
-    // Commit Ended
+    /// Commit Ended
     CommitEnded
 }
 
@@ -43,6 +43,8 @@ pub struct Commit {
     r_address: Address,
     /// owner's signature on commitment's blob 
     signature: Option<Signature>,
+    /// invalidating signature for the commi
+    invalidating_signature: Option<Signature>,
 }
 
 impl Commit {
@@ -68,10 +70,14 @@ impl Commit {
         keccak256(blob.as_slice()).into()
     }
 
-    pub fn invalidating_hash(&self) -> H256 {
+    pub fn add_invalidating_signature(&self, invalidating_signature: Signature) -> Result<(), anyhow::Error> {
         let mut blob: [u8; 256];
         U256::from(self.u).to_little_endian(&mut blob);
-        keccak256(blob.as_slice()).into()
+        let i_hash: H256 = keccak256(blob.as_slice()).into();
+
+        // check signature
+
+        Ok(())
     }
 }
 
@@ -110,22 +116,32 @@ pub enum CommitmentEvent {
 }
 
 #[derive(Debug)]
-pub enum HandlerEvent {
+pub enum ProcedureRequest {
     /// Find a valid index for commitment
     FindCommitmentIndex { 
         query_id: indexer::QueryId,
         sender: oneshot::Sender<Result<u32, anyhow::Error>>,
-    },
-    /// Add invalidating signature of the query id
-    AddInvalidatingSignature {
+    }
+}
+
+pub enum ProcedureCommand {
+    /// End commit proecure and 
+    /// return commitments
+    End {
         query_id: indexer::QueryId,
-        signature: String,
+        sender: oneshot::Sender<Result<(
+            // commitments sent
+            Vec<Commit>, 
+            // commitments received
+            Vec<Commit>,
+        ), Box<anyhow::Error>>>,
     },
-    /// Notifies commitment received
-    ReceivedCommitment {
-        commitment: Commit,
-        query_id: indexer::QueryId,
-    },
+    /// Process requst received over
+    /// network for query 
+    ReceivedRequest {
+        request_id: request_response::RequestId,
+        request: network::CommitRequest,
+    }
 }
 
 #[derive(Default)]
@@ -134,15 +150,15 @@ struct PeerWallet {
     pub owner_address: Address
 }
 
-struct Handler {
+struct Procedure {
     request: Request,
     peer_wallet: PeerWallet,
     commitments_sent: HashMap<u32, Commit>,
     commitments_received: HashMap<u32, Commit>,
     stage: Stage,
     network_client: network::Client,
-    command_receiver: mpsc::Receiver<Command>,
-    handler_sender: mpsc::Sender<HandlerEvent>,
+    command_receiver: mpsc::Receiver<ProcedureCommand>,
+    request_sender: mpsc::Sender<ProcedureRequest>,
     node: EthNode
 }
 
@@ -154,12 +170,12 @@ enum RoundType {
     T2 = 2
 }
 
-impl Handler {
+impl Procedure {
     pub fn new(
         request: Request,
         network_client: network::Client,
-        command_receiver: mpsc::Receiver<Command>,
-        handler_sender: mpsc::Sender<HandlerEvent>,
+        command_receiver: mpsc::Receiver<ProcedureCommand>,
+        request_sender: mpsc::Sender<ProcedureRequest>,
         node: EthNode,
     ) -> Self {
         Self {
@@ -170,24 +186,24 @@ impl Handler {
             stage: Stage::Unitialised,
             network_client,
             command_receiver,
-            handler_sender,
+            request_sender,
             node,
         }
     }
 
     pub async fn start(
         mut self,
-    ) {
+    ) -> Result<(), anyhow::Error>{
         loop {
             select! {
                 command = self.command_receiver.recv() => {
                     if let Some(c) = command {
                         match c {
-                            Command::ReceivedRequest {
+                            ProcedureCommand::ReceivedRequest {
                                 request_id,
                                 request,
                             } => {
-                                match request {
+                                match request { 
                                     network::CommitRequest::CommitFund {
                                         query_id,
                                         round,
@@ -211,56 +227,27 @@ impl Handler {
                                             }
                                         }
                                     },
-                                    // Recevied invalidting signature from service requester
-                                    network::CommitRequest::InvalidatingSignature {
-                                        query_id,
-                                        invalidating_signature
-                                    } => {
-                                        // TODO check invalidating signature is correct for every commitment
-                                        // Evict all the commitments
-
-                                        self.handler_sender.send(HandlerEvent::AddInvalidatingSignature {
-                                            query_id,
-                                            signature: invalidating_signature,
-                                        }).await;
-
-                                        self.network_client.send_dse_message_response(request_id, network::DseMessageResponse::Commit(
-                                            network::CommitResponse::AckInvalidatingSignature(query_id)
-                                        )).await;
-
-                                        // TODO END the handler
-                                    }
+                                    
                                     _ => {}
                                 }
                             },
-                            // Command to be used by service requester to produce
-                            // invalidating signatures for the query
-                            Command::ProduceInvalidatingSignature(query_id) => {
-                                // Only service requester can produce invalidating signature
-                                if query_id == self.request.query_id() && self.request.is_requester == true {
-                                    // TODO produce invalidating signature & send it country party   
-                                    let invalidating_signature: String = "FakeSiganture".into();
+                            ProcedureCommand::End {
+                                query_id,
+                                sender
+                            } => {
+                                if query_id == self.request.query_id() {
+                                    sender.send(Ok((
+                                        self.commitments_sent.clone().into_values().collect(),
+                                        self.commitments_received.clone().into_values().collect(),
+                                    )));
 
-                                    self.handler_sender.send(HandlerEvent::AddInvalidatingSignature {
-                                        query_id,
-                                        signature: invalidating_signature.clone(),
-                                    }).await;
+                                    // END procedure
+                                    return Ok(());
 
-                                    match self.network_client.send_dse_message_request(self.request.counter_party_peer_id(), network::DseMessageRequest::Commit(
-                                        network::CommitRequest::InvalidatingSignature {
-                                            query_id,
-                                            invalidating_signature,
-                                        }
-
-                                        // TODO END the handler
-                                    )).await {
-                                        Ok(res) => {},
-                                        Err(_) => {
-                                            // TODO probably try again? 
-                                        }
-                                    }
+                                }else {
+                                    sender.send(Err(Box::new(anyhow::anyhow!("Wrong query id!"))));
                                 }
-                            }
+                            },
                             _ => {}
                         }
                     }
@@ -275,10 +262,31 @@ impl Handler {
                 let round = self.next_expected_round();
                 
                 if round == self.rounds() {
+                    // All necessary commitments have been received,
+                    // thus notify main.
+                    // Note that we can't end thread rn, since the 
+                    // counter party might ask for pending commits from 
+                    // self.
                     if self.request.is_requester == true {
                         // TODO: notify main to wait for service
                     }else {
                         // TODO: notify main to provide service
+                    }
+
+                    // ask counter party to end commit
+                    match self.network_client.send_dse_message_request(self.request.counter_party_peer_id() , network::DseMessageRequest::Commit(network::CommitRequest::EndCommit(self.request.query_id()))).await {
+                        Ok(res) => {
+                            match res {
+                                network::DseMessageResponse::Commit(network::CommitResponse::AckEndCommit(query_id)) => {
+                                    if query_id == self.request.query_id() {
+                                        // TODO  end commit
+
+                                    }
+                                },
+                                _ => {}
+                            }
+                        },
+                        Err(_) => {}
                     }
                 }else {
                     // send round request
@@ -295,31 +303,25 @@ impl Handler {
 
                                             // TODO check index is valid according to peer's wallet
 
-                                            // TODO check epoch is valid according to peer's wallet
+                                            // TODO check epoch is valid according to peer's wallet (probably also check that there
+                                            // exists enough time before epoch expires)
 
-                                            // we are checking type of commitment expected 
-                                            // from the peer for this round, thus we negate is_requester
-                                            if commitment.c_type != self.round_commitment_type(round, !self.request.is_requester) {return;}
-                                            // u should match query_id
-                                            if commitment.u != self.request.query_id() {return;}
-                                            // if self is requester, then i_address should be of self
-                                            if self.request.is_requester == true && commitment.i_address != self.node.signer_address() {return;}                                 
-                                            // if self is not requester, then i_address should be of peer
-                                            if self.request.is_requester == false && commitment.i_address != self.peer_wallet.owner_address {return;}                                 
-                                            // If commit is of type 2, then r_address should of self.
-                                            if commitment.c_type == RoundType::T2 && commitment.r_address != self.node.signer_address() {return;}
-                                            // check signature
-
-
-                                            // commitment received
-                                            self.commitments_received.insert(round, commitment.cloned());
-
-                                            // send to parent
-                                            let (sender, receiver) = oneshot::channel::<Result<u32, anyhow::Error>>();
-                                            self.handler_sender.send(
-                                                HandlerEvent::ReceivedCommitment { commitment, query_id }
-                                            ).await;
-                                            receiver.await;
+                                            if 
+                                                // we are checking type of commitment expected 
+                                                // from the peer for this round, thus we negate is_requester
+                                                commitment.c_type == self.round_commitment_type(round, !self.request.is_requester) && 
+                                                // u should match query_id
+                                                commitment.u != self.request.query_id() &&
+                                                // if self is requester, then i_address should be of self
+                                                self.request.is_requester == true && commitment.i_address != self.node.signer_address() && 
+                                                // if self is not requester, then i_address should be of peer
+                                                self.request.is_requester == false && commitment.i_address != self.peer_wallet.owner_address &&
+                                                // If commit is of type 2, then r_address should of self.
+                                                commitment.c_type == RoundType::T2 && commitment.r_address != self.node.signer_address()
+                                            {
+                                                // commitment received
+                                                self.commitments_received.insert(round, commitment.clone());
+                                            }
                                         }
                                 },
                                 _ => {}
@@ -423,8 +425,8 @@ impl Handler {
             Some(val) => Ok(val.clone()),
             None => {
                 let (sender, receiver) = oneshot::channel::<Result<u32, anyhow::Error>>();
-                self.handler_sender.send(
-                    HandlerEvent::FindCommitmentIndex { 
+                self.request_sender.send(
+                    ProcedureRequest::FindCommitmentIndex { 
                         query_id: self.request.query_id(), 
                         sender
                     }
@@ -447,6 +449,7 @@ impl Handler {
                         }
                     },
                     signature: None,
+                    invalidating_signature: None,
                 };
                 commit.signature = Some(self.node.sign_commit_message(&commit));
 
@@ -459,15 +462,18 @@ impl Handler {
 
 #[derive(Debug)]
 enum Command {
-    // Process new request in new handler
-    AddRequest(Request),
-    // Received a request over network
+    /// Process new request in new handler
+    StartCommitProcedure(Request),
+    /// Received a request over network
     ReceivedRequest{
         request: network::CommitRequest,
         request_id: request_response::RequestId,
     },
-    // Produces invalidting signature (used by service requester)
+    /// Produces invalidting signature (used by service requester)
     ProduceInvalidatingSignature(indexer::QueryId),
+    /// End commit procedure for a query id.
+    /// Used for ending commit procedure by force
+    ForceEndCommit(indexer::QueryId),
 }
 
 #[derive(Clone)]
@@ -488,14 +494,6 @@ impl Client {
 
     }
 
-    // pub async fn handle_find_commitment(&mut self, query_id: indexer::QueryId, c_type: RoundType) -> Result<String, anyhow::Error> {
-    //     let (sender, receiver) = oneshot::channel();    
-    //     self.command_sender.send(
-    //         Command::FindCommitment { query_id, c_type, sender }
-    //     ).await.expect("commitments: Command sender message dropped");
-    //     receiver.await.expect("commitments: Response message dropped")
-    // }
-
     pub async fn handle_produce_invalidating_signature(&mut self, query_id: indexer::QueryId) -> Result<String, anyhow::Error> {
         let (sender, receiver) = oneshot::channel();    
         self.command_sender.send(
@@ -511,27 +509,26 @@ struct Commitment {
     /// Network client
     network_client: network::Client,
     /// Used for handlers to send events
-    handler_sender: mpsc::Sender<HandlerEvent>,
+    procedure_request_sender: mpsc::Sender<ProcedureRequest>,
     /// Receives events from all handlers
-    handler_receiver: mpsc::Receiver<HandlerEvent>,
+    procedure_request_receiver: mpsc::Receiver<ProcedureRequest>,
     /// Requests under process
-    pending_requests: HashMap<indexer::QueryId, mpsc::Sender<Command>>,
+    ongoing_procedures: HashMap<indexer::QueryId, (
+        Request,
+        mpsc::Sender<ProcedureCommand>
+    )>,
     /// Indexes not used for commitment
     unused_indexes: VecDeque<u32>,
-    /// Indexes used for T1 commitments by query
-    type1_used_indexes: HashMap<indexer::QueryId, VecDeque<u32>>,
-    /// Indexes used for T2 commitments by query
-    type2_used_indexes: HashMap<indexer::QueryId, VecDeque<u32>>,
-    /// T1 commitmnts received 
-    type1_recv_commitments: HashMap<indexer::QueryId, VecDeque<Commit>>,
+    /// Indexes spent on T2 commits
+    type2_spent_commits: HashMap<indexer::QueryId, Vec<Commit>>,
+    /// T1 commitments received 
+    type1_recv_commitments: HashMap<indexer::QueryId, Vec<Commit>>,
     /// T2 commitments received
-    type2_recv_commitments: HashMap<indexer::QueryId, VecDeque<Commit>>,
+    type2_recv_commitments: HashMap<indexer::QueryId, Vec<Commit>>,
     /// Invalidating signatures by query id
-    invalidating_signatures: HashMap<indexer::QueryId, String>,
+    invalidating_signatures: HashMap<indexer::QueryId, Signature>,
     /// eth node instance
     node: EthNode,
-    // TODO create a struct of commitment that stores the message as well as the signture
-    // TODO we haven't taken care of storing invalidating signature history per index
 }
 
 impl Commitment {
@@ -542,17 +539,16 @@ impl Commitment {
         index_value: U256,
         node: EthNode,
     ) -> Self {
-        let (handler_sender, handler_receiver) = mpsc::channel(10);
+        let (procedure_request_sender, procedure_request_receiver) = mpsc::channel(10);
 
         Self {
             command_receiver,
             network_client,
-            handler_sender,
-            handler_receiver,
-            pending_requests: Default::default(),
+            procedure_request_sender,
+            procedure_request_receiver,
+            ongoing_procedures: Default::default(),
             unused_indexes: Default::default(),
-            type1_used_indexes: Default::default(),
-            type2_used_indexes: Default::default(),
+            type2_spent_commits: Default::default(),
             type1_recv_commitments: Default::default(),
             type2_recv_commitments: Default::default(),
             invalidating_signatures: Default::default(),
@@ -577,13 +573,70 @@ impl Commitment {
                         None => {}
                     }
                 },
-                event = self.handler_receiver.recv() => {
+                event = self.procedure_request_receiver.recv() => {
                     match event {
-                        Some(e) => {self.handler_events(e).await},
+                        Some(e) => {self.procedure_requests(e).await},
                         None => {}
                     }
                 }
             }
+
+            // Every 20 seconds or so check which commit procedures should be ended
+            let mut interval = time::interval(time::Duration::from_secs(20));
+            interval.tick().await;
+
+            let mut remove_set: HashSet<indexer::QueryId> = HashSet::new();
+            for (query_id, (request, m_sender)) in self.ongoing_procedures.iter() {
+                // check invalidating signature is present or not
+                if self.invalidating_signatures.contains_key(&query_id) {
+                    // end commit procedure
+                    let (sender, receiver) = oneshot::channel();
+                    m_sender.send(ProcedureCommand::End {
+                        query_id: query_id.clone(),
+                        sender,
+                    }).await;
+                    match receiver.await.expect("commitment: Failed to end commit procedure") {
+                        Ok(res) => {
+                            // process sent commits
+                            let mut t2_spent_commits: Vec<Commit> = Vec::new();
+                            for commit in res.0.iter() {
+                                if commit.c_type == RoundType::T1 {
+                                    // t1 indexes are free to be used again
+                                    self.unused_indexes.push_back(commit.index);
+                                }else {
+                                    t2_spent_commits.push(commit.clone());
+                                }
+                            }
+                            // t2 commits (& indexes) are spent unless not redeemed before
+                            // next epoch
+                            self.type2_spent_commits.insert(query_id.clone(), t2_spent_commits);
+
+                            // process received commits
+                            let mut t1_recv_commits: Vec<Commit> = Vec::new();
+                            let mut t2_recv_commits: Vec<Commit> = Vec::new();
+                            for commit in res.1.iter() {
+                                if commit.c_type == RoundType::T1 {
+                                    // t1 indexes are free to be used again
+                                    t1_recv_commits.push(commit.clone());
+                                }else {
+                                    t2_recv_commits.push(commit.clone());
+                                }
+                            }
+                            self.type1_recv_commitments.insert(query_id.clone(), t1_recv_commits);
+                            self.type2_recv_commitments.insert(query_id.clone(), t2_recv_commits);
+
+                            remove_set.insert(query_id.clone());
+                        },
+                        Err(_) => {
+                            // TODO handle error here
+                        }
+                    }
+                }
+            }
+
+            // remove ongoing_procedures in remove_set
+            self.ongoing_procedures.retain(|&k, _| !remove_set.contains(&k));
+
         }
     }
 
@@ -594,37 +647,79 @@ impl Commitment {
                 request,
             } => {
                 match request {
+                    // Recevied invalidting signature from service requester
+                    network::CommitRequest::InvalidatingSignature {
+                        query_id,
+                        invalidating_signature
+                    } => {
+                        match self.ongoing_procedures.get(&query_id) {
+                            Some((request, sender)) => {
+                                // peer can produce and send invalidating signature
+                                // if self is not requester
+                                if request.is_requester == false {
+                                    // TODO check invalidating signatur is valid 
+
+                                    self.invalidating_signatures.insert(query_id, invalidating_signature);
+
+                                    self.network_client.send_dse_message_response(request_id, network::DseMessageResponse::Commit(
+                                        network::CommitResponse::AckInvalidatingSignature(query_id)
+                                    )).await;
+                                }
+                            }, 
+                            None => {}
+                        }
+                    },
                     network::CommitRequest::CommitFund {
                         query_id,
                         round
                     } => {
-                        
-                    },
-                    network::CommitRequest::EndCommit(query_id) => {
-                        // check whether commit has ended; if yes, then send yes
-
+                        match self.ongoing_procedures.get(&query_id) {
+                            Some((_, sender)) => {
+                                sender.send(
+                                    ProcedureCommand::ReceivedRequest {
+                                        request_id,
+                                        request,
+                                    }
+                                ).await;
+                            }, 
+                            None => {}
+                        }
                     },
                     _ => {}
                 }
             },
-            Command::AddRequest(request)  => {
+            Command::StartCommitProcedure(request)  => {
                 // create new handler
-                let (sender, receiver) = mpsc::channel::<Command>(10);
-                // insert sender for handler to pending requests
-                self.pending_requests.insert(request.query_id().clone(), sender);
-                let handler = Handler::new(request, self.network_client.clone(), receiver, self.handler_sender.clone(), self.node.clone());
-                tokio::spawn(handler.start());
+                let (sender, receiver) = mpsc::channel::<ProcedureCommand>(10);
+                // insert sender for procedure to pending requests
+                self.ongoing_procedures.insert(request.query_id().clone(), (request.clone(), sender));
+                let procedure = Procedure::new(request, self.network_client.clone(), receiver, self.procedure_request_sender.clone(), self.node.clone());
+                tokio::spawn(procedure.start());
             },
             Command::ProduceInvalidatingSignature(query_id) => {
-                // TODO notify handlers
+                match self.ongoing_procedures.get(&query_id) {
+                    Some((request, sender)) => {
+                        // can produce invalidating singature only when self is requester
+                        if request.is_requester {
+                            let mut q_id: [u8; 256] = [0; 256];
+                            U256::from(query_id).to_little_endian(&mut q_id);
+                            let invalidating_signature = self.node.sign_message(keccak256(q_id.as_slice()).into());
+                            self.invalidating_signatures.insert(query_id, invalidating_signature);
+                        }
+                    },
+                    None => {}
+                }
+            },
+            Command::ForceEndCommit(query_id) => {
+                
             },
             _ => {}
         }
     }
 
-    pub async fn handler_events(&mut self, event: HandlerEvent) {
+    pub async fn procedure_requests(&mut self, event: ProcedureRequest) {
         match event {
-            HandlerEvent::FindCommitmentIndex {
+            ProcedureRequest::FindCommitmentIndex {
                     query_id,
                     sender
                 } => {
@@ -635,109 +730,14 @@ impl Commitment {
                         None => {
                             sender.send(Err(anyhow::anyhow!("Commitments: Err - no index left")))
                         }
-                    }
-                    ;
+                    };
             },
-            HandlerEvent::AddInvalidatingSignature {
-                    query_id, 
-                    signature,
-                }  => {
-
-                // Free up indexes used for
-                // type 1 commitment by query id.
-                // We don't touch indexes used for
-                // type 2 commitments, since they are
-                // spent irrespective of invaldiating 
-                // signature.
-                match self.type1_used_indexes.remove(&query_id) {
-                    Some(vec)=> {
-                        for i in vec.iter() {
-                            self.unused_indexes.push_back(i.clone());
-                        }
-                    },
-                    None => {}
-                }
-
-                // Delete type 1 commitments received
-                // since they aren't valid anymore.
-                // We don't touch type 2 commitments received 
-                // for this query, since they have been 
-                // finalised (i.e. can be redeemed on-chain)
-                self.type1_recv_commitments.remove(&query_id);
-
-                // store the invalidating signature for the query id
-                self.invalidating_signatures.insert(query_id, signature);
-            },
-            HandlerEvent::ReceivedCommitment {
-                commitment,
-                query_id, 
-            } => {
-                match commitment.c_type {
-                    RoundType::T1 => {
-                        match self.type1_recv_commitments.get_mut(&query_id) {
-                            Some(vec) => {
-                                vec.push_back(commitment);
-                            },
-                            None => {
-                                let mut vec: VecDeque<Commit> = VecDeque::new();
-                                vec.push_back(commitment);
-                                self.type1_recv_commitments.insert(query_id, vec);
-                            }
-                        }
-                    },
-                    RoundType::T2 => {
-                        match self.type2_recv_commitments.get_mut(&query_id) {
-                            Some(vec) => {
-                                vec.push_back(commitment);
-                            },
-                            None => {
-                                let mut vec: VecDeque<Commit> = VecDeque::new();
-                                vec.push_back(commitment);
-                                self.type2_recv_commitments.insert(query_id, vec);
-                            }
-                        }
-                    }
-                }
-            }
         }
     }
 
     pub fn find_index(&mut self, query_id: indexer::QueryId) -> Option<u32> {
         self.unused_indexes.pop_front()
     }
-
-    /// Stores indexes used for type 1 
-    /// and type 2 commitments by query id 
-    pub fn mark_index_in_use(&mut self, query_id: indexer::QueryId, index: u32, c_type: RoundType) {
-        match c_type {
-            RoundType::T1 => {
-                match self.type1_used_indexes.get(&query_id) {
-                    Some(vec) => {
-                        vec.push_back(index);
-                    },
-                    None => {
-                        let v: VecDeque<u32> = VecDeque::new();
-                        v.push_back(index);
-                        self.type1_used_indexes.insert(query_id, v);
-                    }
-                }
-            },
-            RoundType::T2 => {
-                match self.type2_used_indexes.get(&query_id) {
-                    Some(vec) => {
-                        vec.push_back(index);
-                    },
-                    None => {
-                        let v: VecDeque<u32> = VecDeque::new();
-                        v.push_back(index);
-                        self.type1_used_indexes.insert(query_id, v);
-                    }
-                }
-            }
-        }
-    }
-
-    // Wallet
 
     // // range usage is disabled for now
     // pub fn find_index_range(&mut self, amount: U256) -> Option<(u32, u32)> {
@@ -762,17 +762,15 @@ impl Commitment {
 
 // Progrssive commitment 
 // 1
+// 1    1
 // 1
-//     1
+// 1    1
 // 1
+// 1    1
 // 1
-//     1
+// 1    1
 // 1
-// 1
-//     1
-// 1
-// 1
-//     1
+// 1    1
 
 
 // issues
@@ -784,3 +782,33 @@ impl Commitment {
 
 // TODO
 // 1. Add fns for creating signatures and verification
+
+
+ // Command to be used by service requester to produce
+                            // invalidating signatures for the query
+                            // Command::ProduceInvalidatingSignature(query_id) => {
+                            //     // Only service requester can produce invalidating signature
+                            //     if query_id == self.request.query_id() && self.request.is_requester == true {
+                            //         // TODO produce invalidating signature & send it country party   
+                            //         let invalidating_signature: String = "FakeSiganture".into();
+
+                            //         self.handler_sender.send(HandlerEvent::AddInvalidatingSignature {
+                            //             query_id,
+                            //             signature: invalidating_signature.clone(),
+                            //         }).await;
+
+                            //         match self.network_client.send_dse_message_request(self.request.counter_party_peer_id(), network::DseMessageRequest::Commit(
+                            //             network::CommitRequest::InvalidatingSignature {
+                            //                 query_id,
+                            //                 invalidating_signature,
+                            //             }
+
+                            //             // TODO END the handler
+                            //         )).await {
+                            //             Ok(res) => {},
+                            //             Err(_) => {
+                            //                 // TODO probably try again? 
+                            //             }
+                            //         }
+                            //     }
+                            // }

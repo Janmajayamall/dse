@@ -142,17 +142,17 @@ impl Client {
 /// Main interface thru which user interacts.
 /// That means sends and receives querues & bids.
 struct Indexer {
-    // Receives indexer commands
+    /// Receives indexer commands
     command_receiver: mpsc::Receiver<Command>,
-    // TODO - I think this is useless
+    /// FIX - I think this is useless
     event_sender: mpsc::Sender<IndexerEvent>,
-    // Receives events from the server
+    /// Receives events from the server
     server_event_receiver: mpsc::Receiver<server::ServerEvent>,
-    // Sends events to server
+    /// Sends events to server
     server_client_senders: HashMap<usize, mpsc::UnboundedSender<warp::ws::Message>>,
-    // network client
+    /// network client
     network_client: network::Client,
-    // commitment client
+    /// commitment client
     commitment_client: commitment::Client
 }
 

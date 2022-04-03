@@ -229,7 +229,8 @@ impl Indexer {
             ServerEvent::NewWsMessage { client_id, message } => {
                 // TODO handle message
                 // request node id using indexer event of RequestNodeMultiAddr
-            }
+            },
+            _ => {}
         }
         // self.event_sender.send(event).await.expect("Indexer event message dropped!");
     }

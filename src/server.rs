@@ -5,7 +5,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use tokio::{select, task};
 use tokio::sync::{mpsc};
 use warp::ws::{WebSocket, Message};
-use warp::Filter;
+use warp::{Filter, http};
 
 use super::indexer;
 
@@ -41,15 +41,20 @@ pub enum ServerEvent {
 // counter for server client id
 static ID_COUNTER: AtomicUsize = AtomicUsize::new(1);
 
+pub fn with_sender<T: Send + Sync>(
+    sender: mpsc::Sender<T>
+) -> impl Filter<Extract = (mpsc::Sender<T>,), Error = std::convert::Infallible> + Clone {
+        warp::any().map(move || sender.clone())
+} 
+
 pub async fn new(
     server_event_sender: mpsc::Sender<ServerEvent>,
 
 ) {
-    let ws_sender = server_event_sender.clone();
     let ws_main = warp::path!("connect")
         .and(warp::ws())
-        .map(move |ws: warp::ws::Ws| {
-            let event_sender = ws_sender.clone(); 
+        .and(with_sender(server_event_sender.clone()))
+        .map(move |ws: warp::ws::Ws, event_sender: mpsc::Sender<ServerEvent>| {
             ws.on_upgrade(move |socket| ws_connection_established(socket, event_sender))
         });
 
@@ -58,35 +63,38 @@ pub async fn new(
         // only 16kb of post data
         .and(warp::body::content_length_limit(1024 * 16))
         .and(warp::body::json())
-        .and(server_event_sender.clone())
-        .map(move |query: indexer::Query, event_sender | {
-            event_sender.send(
-                ServerEvent::NewQuery {
-                    query,
-                }
-            );
-            warp::reply()
-        });
+        .and(with_sender(server_event_sender.clone()))
+        .and_then(handle_newquery);
     
     let post_bid = warp::post()
         .and(warp::path("placebid"))
         // only 16kb of post data
         .and(warp::body::content_length_limit(1024 * 16))
         .and(warp::body::json())
-        .and_then()
-        .map(move |bid: indexer::Bid| {
-            let event_sender = server_event_sender.clone();
-            event_sender.send(
-                ServerEvent::PlaceBid {
-                    bid,
-                }
-            );
-            warp::reply()
-        });
-
+        .and(with_sender(server_event_sender.clone()))
+        .and_then(handle_placebid);
+    
     let main = post_bid.or(post_query).or(ws_main);
 
     warp::serve(main).run(([127, 0,0,1], 3000)).await;
+}
+
+async fn handle_newquery(query: indexer::Query, event_sender: mpsc::Sender<ServerEvent> ) -> Result<impl warp::Reply, std::convert::Infallible>  {
+        event_sender.send(
+                ServerEvent::NewQuery {
+                    query,
+                }
+        ).await;
+        Ok(http::StatusCode::OK)
+}
+
+async fn handle_placebid(bid: indexer::Bid, event_sender: mpsc::Sender<ServerEvent> ) -> Result<impl warp::Reply, std::convert::Infallible> {
+        event_sender.send(
+            ServerEvent::PlaceBid {
+                bid,
+            }
+        ).await;
+        Ok(http::StatusCode::OK)
 }
 
 async fn ws_connection_established(ws: WebSocket, event_sender: mpsc::Sender<ServerEvent>) {

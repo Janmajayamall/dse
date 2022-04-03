@@ -4,13 +4,24 @@ use libp2p::{PeerId, Multiaddr};
 use log::{error, debug, info};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, VecDeque, HashSet};
-use std::str::FromStr;
+use std::{sync::{Arc, Mutex}, str::FromStr};
 use tokio::sync::{mpsc, oneshot};
 use tokio::{select, time};
 
 use super::ethnode::EthNode;
 use super::indexer;
 use super::network;
+
+struct CommitmentDb {
+    /// Indexes spent on T2 commits
+    type2_spent_commits: HashMap<indexer::QueryId, Vec<Commit>>,
+    /// T1 commitments received 
+    type1_recv_commitments: HashMap<indexer::QueryId, Vec<Commit>>,
+    /// T2 commitments received
+    type2_recv_commitments: HashMap<indexer::QueryId, Vec<Commit>>,
+    /// Invalidating signatures by query id
+    invalidating_signatures: HashMap<indexer::QueryId, Signature>,
+}
 
 enum Stage {
     /// Waiting for countr party wallet address
@@ -477,7 +488,6 @@ impl Client {
         }
     }
 
-    
     pub async fn start_commit_procedure(&mut self, request: Request) -> Result<(), anyhow::Error> {
         let (sender, receiver) = oneshot::channel();
         self.command_sender.send(

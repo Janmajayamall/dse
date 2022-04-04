@@ -36,7 +36,7 @@ enum Stage {
     CommitEnded
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 pub struct Commit { 
     /// index used for the commitment
     index: u32,
@@ -72,11 +72,8 @@ impl Commit {
         blob.extend_from_slice(self.i_address.as_bytes());
 
         // r_address is added for commitment type 2
-        match self.c_type {
-            RoundType::T2 => {
-                blob.extend_from_slice(self.r_address.as_bytes());
-            },
-            _ => {}
+        if self.c_type == RoundType::T2 {
+            blob.extend_from_slice(self.r_address.as_bytes());
         }
         
         keccak256(blob.as_slice()).into()
@@ -210,7 +207,7 @@ impl Procedure {
                                                 Ok(commitment) => {
                                                     debug!("commit procedure: sending commit {:?} for round {:?} for query_id {:?}", commitment.clone(), round, query_id);
                                                     // send response to the request
-                                                    self.network_client.send_dse_message_response(request_id, network::DseMessageResponse::Commit(
+                                                    let _ = self.network_client.send_dse_message_response(request_id, network::DseMessageResponse::Commit(
                                                         network::CommitResponse::CommitFund {
                                                             query_id,
                                                             round,
@@ -225,7 +222,12 @@ impl Procedure {
                                             }
                                         }
                                     },
-                                    
+                                    network::CommitRequest::InvalidatingSignature {
+                                        query_id,
+                                        invalidating_signature,
+                                    } => {
+
+                                    },  
                                     _ => {}
                                 }
                             },
@@ -235,7 +237,7 @@ impl Procedure {
                             } => {
                                 if query_id == self.request.query_id() {
                                     debug!("commit procedure: end command received for query {:?}", query_id.clone());
-                                    sender.send(Ok((
+                                    let _ = sender.send(Ok((
                                         self.commitments_sent.clone().into_values().collect(),
                                         self.commitments_received.clone().into_values().collect(),
                                     )));
@@ -244,7 +246,7 @@ impl Procedure {
                                     return Ok(());
 
                                 }else {
-                                    sender.send(Err(Box::new(anyhow::anyhow!("Wrong query id!"))));
+                                    let _ = sender.send(Err(Box::new(anyhow::anyhow!("Wrong query id!"))));
                                 }
                             },
                             _ => {}
@@ -268,11 +270,7 @@ impl Procedure {
                     // Note that we can't end thread rn, since the 
                     // counter party might ask for pending commits from 
                     // self.
-                    if self.request.is_requester == true {
-                        // TODO: notify main to wait for service
-                    }else {
-                        // TODO: notify main to provide service
-                    }
+                    // TODO: notify main to wait for service
                     debug!("commit procedure: all commits have been received for query_id {:?}", self.request.query_id());
                 }else {
                     // send round request
@@ -339,6 +337,7 @@ impl Procedure {
                 }
             }
         }
+        
     }
 
     /// Returns true if counter party has asked for 
@@ -366,10 +365,13 @@ impl Procedure {
         for n in 0..self.rounds() {
             // provider only sends commitments in odd rounds
             // since it only has to commit half as much as requester
-            if (self.request.is_requester == true && n % 2 == 1) || self.request.is_requester == false {
-                if self.commitments_received.contains_key(&n) == false {
-                    return n;
-                }
+            if 
+                (
+                    (self.request.is_requester == true && n % 2 == 1) || 
+                    self.request.is_requester == false
+                ) &&
+                self.commitments_received.contains_key(&n) == false {
+                return n;
             }
         }
         // recieved all commitments
@@ -586,13 +588,6 @@ impl Commitment {
         }
     }
 
-    pub fn new_commitment(bid: indexer::BidReceived, query: indexer::QueryReceived,is_requester: bool) {
-        let request = Request {
-            is_requester,
-            bid,
-            query,
-        };
-    }
 
     pub async fn run(mut self) {
         loop {

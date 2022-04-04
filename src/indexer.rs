@@ -1,22 +1,23 @@
-use std::collections::HashMap;
-use libp2p::{PeerId, Multiaddr};
+use libp2p::{Multiaddr, PeerId};
 use log::{debug, error, info};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use tokio::select;
 use tokio::sync::{mpsc, oneshot};
-use tokio::{select};
 
+use super::commitment;
 use super::network;
 use super::server;
-use super::commitment;
 
 pub type QueryId = u32;
 
-#[derive(Deserialize, Serialize, Debug, Clone)]
+#[derive(Deserialize, Serialize, Debug, Clone, PartialEq)]
 pub struct Query {
     query: String,
 }
 
-#[derive(Deserialize, Serialize, Debug, Clone)]
+#[derive(Deserialize, Serialize, Debug, Clone, PartialEq)]
 pub struct Bid {
     pub query_id: QueryId,
     // peer id of query requester
@@ -26,7 +27,7 @@ pub struct Bid {
     pub charge: ethers::types::U256,
 }
 
-#[derive(Deserialize, Serialize, Debug, Clone)]
+#[derive(Deserialize, Serialize, Debug, Clone, PartialEq)]
 pub struct BidReceived {
     pub bidder_id: PeerId,
     pub bidder_addr: Multiaddr,
@@ -45,13 +46,12 @@ impl BidReceived {
     }
 }
 
-#[derive(Deserialize, Serialize, Debug, Clone)]
+#[derive(Deserialize, Serialize, Debug, Clone, PartialEq)]
 pub struct QueryReceived {
     pub id: QueryId,
     pub requester_id: PeerId,
     pub requester_addr: Multiaddr,
-    pub query: String,
-    pub expires_at: chrono::DateTime<chrono::Utc>,
+    pub query: Query,
 }
 
 impl QueryReceived {
@@ -60,10 +60,10 @@ impl QueryReceived {
 
 #[derive(Debug)]
 pub enum Command {
-    ReceivedBid{
+    ReceivedBid {
         bid_recv: BidReceived,
         sender: oneshot::Sender<Result<(), anyhow::Error>>,
-    }, 
+    },
     ReceivedQuery {
         query_recv: QueryReceived,
         sender: oneshot::Sender<Result<(), anyhow::Error>>,
@@ -77,7 +77,7 @@ pub enum Command {
         query_id: QueryId,
         peer_id: PeerId,
         sender: oneshot::Sender<Result<(), anyhow::Error>>,
-    }
+    },
 }
 
 #[derive(Debug)]
@@ -94,7 +94,7 @@ pub enum IndexerEvent {
     },
     RequestNodeMultiAddr {
         sender: oneshot::Sender<Result<Multiaddr, anyhow::Error>>, // TODO change it to channel
-    }
+    },
 }
 
 #[derive(Clone)]
@@ -102,41 +102,66 @@ pub struct Client {
     pub command_sender: mpsc::Sender<Command>,
 }
 
-// Client receives commands and forwards them 
+// Client receives commands and forwards them
 impl Client {
-    pub async fn handle_received_bid(&mut self, bid_recv: BidReceived) -> Result<(), anyhow::Error> {
+    pub async fn handle_received_bid(
+        &mut self,
+        bid_recv: BidReceived,
+    ) -> Result<(), anyhow::Error> {
         let (sender, receiver) = oneshot::channel();
-        self.command_sender.send(
-            Command::ReceivedBid { bid_recv, sender}
-        ).await.expect("Command message dropped");
-        receiver.await.expect("Command response dropped")
-    } 
-
-    pub async fn handle_received_query(&mut self, query_recv: QueryReceived) -> Result<(), anyhow::Error> {
-        let (sender, receiver) = oneshot::channel();
-        self.command_sender.send(
-            Command::ReceivedQuery { query_recv, sender }
-        ).await.expect("Command message dropped");
+        self.command_sender
+            .send(Command::ReceivedBid { bid_recv, sender })
+            .await
+            .expect("Command message dropped");
         receiver.await.expect("Command response dropped")
     }
 
-    pub async fn handle_received_bid_acceptance(&mut self, query_id: QueryId, peer_id: PeerId) -> Result<(), anyhow::Error> {
+    pub async fn handle_received_query(
+        &mut self,
+        query_recv: QueryReceived,
+    ) -> Result<(), anyhow::Error> {
         let (sender, receiver) = oneshot::channel();
-        self.command_sender.send(
-            Command::ReceivedBidAcceptance { query_id, peer_id , sender }
-        ).await.expect("Command message dropped");
+        self.command_sender
+            .send(Command::ReceivedQuery { query_recv, sender })
+            .await
+            .expect("Command message dropped");
         receiver.await.expect("Command response dropped")
     }
 
-    pub async fn handle_received_start_commit(&mut self, query_id: QueryId, peer_id: PeerId) -> Result<(), anyhow::Error> {
+    pub async fn handle_received_bid_acceptance(
+        &mut self,
+        query_id: QueryId,
+        peer_id: PeerId,
+    ) -> Result<(), anyhow::Error> {
         let (sender, receiver) = oneshot::channel();
-        self.command_sender.send(
-            Command::ReceivedStartCommit { query_id, peer_id, sender }
-        ).await.expect("Command message dropped");
+        self.command_sender
+            .send(Command::ReceivedBidAcceptance {
+                query_id,
+                peer_id,
+                sender,
+            })
+            .await
+            .expect("Command message dropped");
+        receiver.await.expect("Command response dropped")
+    }
+
+    pub async fn handle_received_start_commit(
+        &mut self,
+        query_id: QueryId,
+        peer_id: PeerId,
+    ) -> Result<(), anyhow::Error> {
+        let (sender, receiver) = oneshot::channel();
+        self.command_sender
+            .send(Command::ReceivedStartCommit {
+                query_id,
+                peer_id,
+                sender,
+            })
+            .await
+            .expect("Command message dropped");
         receiver.await.expect("Command response dropped")
     }
 }
-
 
 /// Main interface thru which user interacts.
 /// That means sends and receives querues & bids.
@@ -152,7 +177,9 @@ pub struct Indexer {
     /// network client
     network_client: network::Client,
     /// commitment client
-    commitment_client: commitment::Client
+    commitment_client: commitment::Client,
+    /// sent query counter
+    query_counter: AtomicUsize,
 }
 
 impl Indexer {
@@ -161,7 +188,7 @@ impl Indexer {
         event_sender: mpsc::Sender<IndexerEvent>,
         server_event_receiver: mpsc::Receiver<server::ServerEvent>,
         network_client: network::Client,
-        commitment_client: commitment::Client
+        commitment_client: commitment::Client,
     ) -> Self {
         Self {
             command_receiver,
@@ -170,6 +197,7 @@ impl Indexer {
             server_client_senders: Default::default(),
             network_client,
             commitment_client,
+            query_counter: AtomicUsize::new(1),
         }
     }
 
@@ -196,25 +224,52 @@ impl Indexer {
     pub async fn command_handler(&mut self, command: Command) {
         match command {
             Command::ReceivedBid { bid_recv, sender } => {
-                self.network_client.add_request_response_peer(bid_recv.bidder_id.clone(), bid_recv.bidder_addr.clone()).await;
+                self.network_client
+                    .add_request_response_peer(
+                        bid_recv.bidder_id.clone(),
+                        bid_recv.bidder_addr.clone(),
+                    )
+                    .await;
                 // TODO something with the query
                 sender.send(Ok(()));
-                debug!("indexer: received bid for query_id {:?} from bidder {:?} with addr {:?} ", bid_recv.bid.query_id, bid_recv.bidder_id, bid_recv.bidder_addr);
-            },
-            Command::ReceivedQuery { query_recv, sender } => {  
-                self.network_client.add_request_response_peer(query_recv.requester_id.clone(), query_recv.requester_addr.clone()).await;
-                // TODO something with query 
+                debug!(
+                    "indexer: received bid for query_id {:?} from bidder {:?} with addr {:?} ",
+                    bid_recv.bid.query_id, bid_recv.bidder_id, bid_recv.bidder_addr
+                );
+            }
+            Command::ReceivedQuery { query_recv, sender } => {
+                self.network_client
+                    .add_request_response_peer(
+                        query_recv.requester_id.clone(),
+                        query_recv.requester_addr.clone(),
+                    )
+                    .await;
+                // TODO something with query
                 sender.send(Ok(()));
                 debug!("indexer: received query with query_id {:?} from requester {:?} with addr {:?} ", query_recv.id, query_recv.requester_id, query_recv.requester_addr);
-            },
-            Command::ReceivedBidAcceptance {query_id, peer_id, sender} => {
+            }
+            Command::ReceivedBidAcceptance {
+                query_id,
+                peer_id,
+                sender,
+            } => {
                 sender.send(Ok(()));
-                debug!("indexer: received bid acceptance for query_id {:?} from requester {:?} ", query_id, peer_id);
-            },
-            Command::ReceivedStartCommit {query_id, peer_id, sender} => {
+                debug!(
+                    "indexer: received bid acceptance for query_id {:?} from requester {:?} ",
+                    query_id, peer_id
+                );
+            }
+            Command::ReceivedStartCommit {
+                query_id,
+                peer_id,
+                sender,
+            } => {
                 // notify wallet for commitment
                 sender.send(Ok(()));
-                debug!("indexer: received start commit for query_id {:?} from peer {:?} ", query_id, peer_id);
+                debug!(
+                    "indexer: received start commit for query_id {:?} from peer {:?} ",
+                    query_id, peer_id
+                );
             }
             _ => {}
         }
@@ -223,12 +278,48 @@ impl Indexer {
     pub async fn server_event_handler(&mut self, event: server::ServerEvent) {
         use server::ServerEvent;
         match event {
-            ServerEvent::NewWsClient { client_id, client_sender } => {
+            ServerEvent::NewWsClient {
+                client_id,
+                client_sender,
+            } => {
                 self.server_client_senders.insert(client_id, client_sender);
-            },
+            }
             ServerEvent::NewWsMessage { client_id, message } => {
                 // TODO handle message
                 // request node id using indexer event of RequestNodeMultiAddr
+            }
+            ServerEvent::NewQuery { query } => match self.network_client.network_details().await {
+                Ok((peer_id, address)) => {
+                    let id = self.query_counter.fetch_add(1, Ordering::Relaxed);
+                    let query_recv = QueryReceived {
+                        id: id.try_into().expect("indexer: Query limit reached"),
+                        requester_id: peer_id,
+                        requester_addr: address,
+                        query,
+                    };
+                    self.network_client
+                        .publish_message(network::GossipsubMessage::NewQuery(query_recv))
+                        .await;
+                }
+                Err(_) => {}
+            },
+            ServerEvent::PlaceBid { bid } => match self.network_client.network_details().await {
+                Ok((peer_id, address)) => {
+                    let bid_recv = BidReceived {
+                        bidder_id: peer_id,
+                        bidder_addr: address,
+                        query_id: bid.query_id,
+                        bid,
+                    };
+                    let _ = self
+                        .network_client
+                        .send_dse_message_request(
+                            peer_id,
+                            message: network::DseMessageRequest::PlaceBid(bid_recv),
+                        )
+                        .await;
+                }
+                Err(_) => {}
             },
             _ => {}
         }
@@ -237,23 +328,26 @@ impl Indexer {
 }
 
 pub fn new(
-        network_client: network::Client,
-        commitment_client: commitment::Client,
-        command_receiver: mpsc::Receiver<Command>
-    ) -> (mpsc::Receiver<IndexerEvent>, Indexer, mpsc::Sender<server::ServerEvent>) {
-
+    network_client: network::Client,
+    commitment_client: commitment::Client,
+    command_receiver: mpsc::Receiver<Command>,
+) -> (
+    mpsc::Receiver<IndexerEvent>,
+    Indexer,
+    mpsc::Sender<server::ServerEvent>,
+) {
     let (indexer_event_sender, indexer_event_receiver) = mpsc::channel::<IndexerEvent>(10);
     let (server_event_sender, server_event_receeiver) = mpsc::channel::<server::ServerEvent>(10);
 
     return (
         indexer_event_receiver,
         Indexer::new(
-            command_receiver, 
-            indexer_event_sender, 
+            command_receiver,
+            indexer_event_sender,
             server_event_receeiver,
             network_client,
             commitment_client,
         ),
-        server_event_sender
-    )
+        server_event_sender,
+    );
 }

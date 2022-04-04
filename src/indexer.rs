@@ -7,6 +7,7 @@ use tokio::select;
 use tokio::sync::{mpsc, oneshot};
 
 use super::commitment;
+use super::database;
 use super::network;
 use super::server;
 
@@ -180,6 +181,8 @@ pub struct Indexer {
     commitment_client: commitment::Client,
     /// sent query counter
     query_counter: AtomicUsize,
+    /// global database
+    database: database::Database,
 }
 
 impl Indexer {
@@ -189,6 +192,7 @@ impl Indexer {
         server_event_receiver: mpsc::Receiver<server::ServerEvent>,
         network_client: network::Client,
         commitment_client: commitment::Client,
+        database: database::Database,
     ) -> Self {
         Self {
             command_receiver,
@@ -198,6 +202,7 @@ impl Indexer {
             network_client,
             commitment_client,
             query_counter: AtomicUsize::new(1),
+            database,
         }
     }
 
@@ -290,6 +295,7 @@ impl Indexer {
             }
             ServerEvent::NewQuery { query } => match self.network_client.network_details().await {
                 Ok((peer_id, address)) => {
+                    debug!("received new query from server - {:?} ", query);
                     let id = self.query_counter.fetch_add(1, Ordering::Relaxed);
                     let query_recv = QueryReceived {
                         id: id.try_into().expect("indexer: Query limit reached"),
@@ -297,6 +303,9 @@ impl Indexer {
                         requester_addr: address,
                         query,
                     };
+
+                    self.database.insert_user_query(&query_recv);
+
                     self.network_client
                         .publish_message(network::GossipsubMessage::NewQuery(query_recv))
                         .await;
@@ -305,17 +314,16 @@ impl Indexer {
             },
             ServerEvent::PlaceBid { bid } => match self.network_client.network_details().await {
                 Ok((peer_id, address)) => {
-                    let bid_recv = BidReceived {
-                        bidder_id: peer_id,
-                        bidder_addr: address,
-                        query_id: bid.query_id,
-                        bid,
-                    };
                     let _ = self
                         .network_client
                         .send_dse_message_request(
                             peer_id,
-                            message: network::DseMessageRequest::PlaceBid(bid_recv),
+                            network::DseMessageRequest::PlaceBid(BidReceived {
+                                bidder_id: peer_id,
+                                bidder_addr: address,
+                                query_id: bid.query_id,
+                                bid,
+                            }),
                         )
                         .await;
                 }
@@ -331,6 +339,7 @@ pub fn new(
     network_client: network::Client,
     commitment_client: commitment::Client,
     command_receiver: mpsc::Receiver<Command>,
+    database: database::Database,
 ) -> (
     mpsc::Receiver<IndexerEvent>,
     Indexer,
@@ -347,6 +356,7 @@ pub fn new(
             server_event_receeiver,
             network_client,
             commitment_client,
+            database,
         ),
         server_event_sender,
     );

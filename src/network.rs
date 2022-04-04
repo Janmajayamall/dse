@@ -86,6 +86,7 @@ impl Behaviour {
         gossipsub
             .subscribe(&GossipsubTopic::Query.ident_topic())
             .expect("Gossipsub subscription to topic SearchQuery failed!");
+        debug!("gosipsub subscribed");
 
         // request response
         let request_response = RequestResponse::new(
@@ -174,7 +175,7 @@ pub async fn new(
     let transport = build_transport(&keypair)?;
     let behaviour = Behaviour::new(&keypair).await;
     let swarm = SwarmBuilder::new(transport, behaviour, peer_id)
-        .executor({ Box::new(CustomExecutor) })
+        .executor(Box::new(CustomExecutor))
         .build();
 
     let (network_event_sender, network_event_receiver) = mpsc::channel::<NetworkEvent>(10);
@@ -357,8 +358,10 @@ impl Client {
 }
 
 pub struct NetworkInterface {
-    keypair: Keypair,
-    node_address: Option<Multiaddr>,
+    /// keypair of the node
+    pub keypair: Keypair,
+    /// Multiaddr of the node
+    pub node_address: Option<Multiaddr>,
     swarm: Swarm<Behaviour>,
     command_receiver: mpsc::Receiver<Command>,
     network_event_sender: mpsc::Sender<NetworkEvent>,
@@ -521,9 +524,10 @@ impl NetworkInterface {
                 {
                     Ok(message_id) => {
                         let _ = sender.send(Ok(message_id));
-                        debug!("gossipsub: published a message {:?}", message);
+                        debug!("(gossipsub) published a message {:?}", message);
                     }
                     Err(e) => {
+                        error!("(gossipsub) failed to publish message {:?}", e);
                         let _ = sender.send(Err(Box::new(e)));
                     }
                 }
@@ -721,7 +725,7 @@ impl NetworkInterface {
                 } => {
                     debug!("request_response: Received request {:?} ", request.clone());
                     self.response_channels_for_inbound_requests
-                        .insert(request_id.clone(), channel);
+                        .insert(request_id, channel);
                     self.network_event_sender
                         .send(NetworkEvent::DseMessageRequestRecv {
                             peer_id: peer,

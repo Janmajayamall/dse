@@ -7,6 +7,7 @@ use tokio::{select, task};
 use warp::ws::{Message, WebSocket};
 use warp::{http, Filter};
 
+use super::database;
 use super::indexer;
 
 #[derive(Deserialize, Serialize, Debug)]
@@ -43,7 +44,17 @@ pub fn with_sender<T: Send + Sync>(
     warp::any().map(move || sender.clone())
 }
 
-pub async fn new(server_event_sender: mpsc::Sender<ServerEvent>) {
+pub fn with_database(
+    db: database::Database,
+) -> impl Filter<Extract = (database::Database,), Error = std::convert::Infallible> + Clone {
+    warp::any().map(move || db.clone())
+}
+
+pub async fn new(
+    server_event_sender: mpsc::Sender<ServerEvent>,
+    db: database::Database,
+    port: u16,
+) {
     let ws_main = warp::path("connect")
         .and(warp::ws())
         .and(with_sender(server_event_sender.clone()))
@@ -69,9 +80,14 @@ pub async fn new(server_event_sender: mpsc::Sender<ServerEvent>) {
         .and(with_sender(server_event_sender.clone()))
         .and_then(handle_placebid);
 
-    let main = post_bid.or(post_query).or(ws_main);
+    let get_user_queries = warp::get()
+        .and(warp::path("userqueries"))
+        .and(with_database(db.clone()))
+        .and_then(handle_get_userqueries);
 
-    warp::serve(main).run(([127, 0, 0, 1], 3000)).await;
+    let main = post_bid.or(post_query).or(get_user_queries).or(ws_main);
+
+    warp::serve(main).run(([127, 0, 0, 1], port)).await;
 }
 
 async fn handle_newquery(
@@ -88,6 +104,18 @@ async fn handle_placebid(
 ) -> Result<impl warp::Reply, std::convert::Infallible> {
     let _ = event_sender.send(ServerEvent::PlaceBid { bid }).await;
     Ok(http::StatusCode::OK)
+}
+
+async fn handle_get_userqueries(
+    db: database::Database,
+) -> Result<Box<dyn warp::Reply>, std::convert::Infallible> {
+    match db.find_user_queries() {
+        Ok(queries) => Ok(Box::new(warp::reply::json(&queries))),
+        Err(e) => {
+            error!("(get: userqueries) errored with {:?}", e);
+            Ok(Box::new(http::StatusCode::INTERNAL_SERVER_ERROR))
+        }
+    }
 }
 
 async fn ws_connection_established(ws: WebSocket, event_sender: mpsc::Sender<ServerEvent>) {

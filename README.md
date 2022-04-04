@@ -2,7 +2,7 @@
 
 [IN PROGRESS]
 
-How about you can trade information/service in exchange of a fee with anyone on interent without having to trust/knowing them? Wouldn't it be amazing if you can just shoot a query for some information on a network and get a worthwile response? You can ask for your anynomity score, your digital traces, data-sets for training, high quality info, or anything you can imagine!
+How about you can trade information/service in exchange of a fee with anyone on interent without having to trust/knowing them? Wouldn't it be amazing if you can just shoot a query for some information on a network and get a worthwile response? You can ask for your anynomity score, your digital traces, data-sets for training, high quality data, code, or anything you can imagine!
 
 This is what DSE aims to acheive.
 

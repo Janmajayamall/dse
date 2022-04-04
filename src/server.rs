@@ -85,7 +85,16 @@ pub async fn new(
         .and(with_database(db.clone()))
         .and_then(handle_get_userqueries);
 
-    let main = post_bid.or(post_query).or(get_user_queries).or(ws_main);
+    let get_recv_queries = warp::get()
+        .and(warp::path("recvqueries"))
+        .and(with_database(db.clone()))
+        .and_then(handle_get_recvqueries);
+
+    let main = post_bid
+        .or(post_query)
+        .or(get_user_queries)
+        .or(get_recv_queries)
+        .or(ws_main);
 
     warp::serve(main).run(([127, 0, 0, 1], port)).await;
 }
@@ -110,6 +119,18 @@ async fn handle_get_userqueries(
     db: database::Database,
 ) -> Result<Box<dyn warp::Reply>, std::convert::Infallible> {
     match db.find_user_queries() {
+        Ok(queries) => Ok(Box::new(warp::reply::json(&queries))),
+        Err(e) => {
+            error!("(get: userqueries) errored with {:?}", e);
+            Ok(Box::new(http::StatusCode::INTERNAL_SERVER_ERROR))
+        }
+    }
+}
+
+async fn handle_get_recvqueries(
+    db: database::Database,
+) -> Result<Box<dyn warp::Reply>, std::convert::Infallible> {
+    match db.find_recv_queries() {
         Ok(queries) => Ok(Box::new(warp::reply::json(&queries))),
         Err(e) => {
             error!("(get: userqueries) errored with {:?}", e);

@@ -5,6 +5,7 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use tokio::select;
 use tokio::sync::{mpsc, oneshot};
+use warp::ws::Message;
 
 use super::commitment;
 use super::database;
@@ -249,7 +250,14 @@ impl Indexer {
                         query_recv.requester_addr.clone(),
                     )
                     .await;
-                // TODO something with query
+
+                // save received query
+                self.database.insert_received_query(&query_recv);
+
+                // inform server clients
+                for (_, client_sender) in self.server_client_senders.iter() {
+                    client_sender.send(Message::binary(serde_json::to_vec(&query_recv).unwrap()));
+                }
                 sender.send(Ok(()));
                 debug!("indexer: received query with query_id {:?} from requester {:?} with addr {:?} ", query_recv.id, query_recv.requester_id, query_recv.requester_addr);
             }

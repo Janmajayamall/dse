@@ -17,11 +17,7 @@ impl Database {
 
     pub fn insert_user_query(&mut self, query: &indexer::QueryReceived) {
         debug!("inserting user query {:?}", query);
-        debug!(
-            "serialsied query {:?} into {:?}",
-            query,
-            bincode::serialize(&query).unwrap()
-        );
+
         let user_queries = self
             .main
             .open_tree(b"user_queries")
@@ -36,6 +32,11 @@ impl Database {
             .open_tree(b"user_received_queries")
             .expect("db: failed to read user received queries");
         user_queries.insert(query.id.to_le_bytes(), bincode::serialize(&query).unwrap());
+    }
+
+    pub fn insert_received_bid(&mut self, bid: &indexer::BidReceived) {
+        debug!("inserting received bid {:?}", bid);
+        
     }
 
     pub fn find_user_queries(&self) -> Result<Vec<indexer::QueryReceived>, anyhow::Error> {

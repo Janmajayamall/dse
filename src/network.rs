@@ -1001,6 +1001,26 @@ pub enum CommitResponse {
     AckEndCommit(indexer::QueryId),
 }
 
+#[derive(Deserialize, Serialize, Debug, Clone, PartialEq)]
+pub enum IndexRequest {
+    // Place bid for a query
+    PlaceBid(indexer::BidReceived),
+    // Accept a bid for a query
+    AcceptBid(indexer::QueryId),
+    // Start commit procedure
+    StartCommit(indexer::QueryId),
+}
+
+#[derive(Deserialize, Serialize, Debug, Clone, PartialEq)]
+pub enum IndexResponse {
+    // Ack that bid was received
+    AckBid(indexer::QueryId),
+    // Ack that bid acceptance was received
+    AckAcceptBid(indexer::QueryId),
+    // Ack that start commit was received
+    AckStartCommit(indexer::QueryId),
+}
+
 // All stuff related to request response
 #[derive(Deserialize, Serialize, Debug, Clone, PartialEq)]
 pub enum DseMessageRequest {

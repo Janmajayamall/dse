@@ -5,7 +5,6 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use tokio::select;
 use tokio::sync::{mpsc, oneshot};
-use warp::ws::Message;
 
 use super::commitment;
 use super::database;
@@ -266,7 +265,7 @@ impl Indexer {
                     });
                 }
                 sender.send(Ok(()));
-                debug!("indexer: received query with query_id {:?} from requester {:?} with addr {:?} ", query_recv.id, query_recv.requester_id, query_recv.requester_addr);
+                debug!("(Command::ReceivedQuery) received query with query_id {:?} from requester {:?} with addr {:?} ", query_recv.id, query_recv.requester_id, query_recv.requester_addr);
             }
 
             Command::ReceivedRequest {
@@ -278,10 +277,43 @@ impl Indexer {
                 match request {
                     network::IndexerRequest::AcceptBid(query_id) => {
                         debug!(
-                            "received bid acceptance for query_id {:?} from requester {:?} ",
+                            "(IndexerRequest::AcceptBid) received bid acceptance for query_id {:?} from requester {:?} ",
                             query_id, peer_id
                         );
-                        sender.send(Ok(()));
+
+                        match self.database.find_user_bid_with_status(&query_id) {
+                            Some(mut bid) => {
+                                // update bid status to accepted
+                                bid.update_status(BidStatus::Accepted);
+                                self.database.insert_user_bid_wth_status(&bid);
+
+                                // send ack back to peer
+                                self.network_client
+                                    .send_dse_message_response(
+                                        request_id,
+                                        network::DseMessageResponse::Indexer(
+                                            network::IndexerResponse::AckAcceptBid(query_id),
+                                        ),
+                                    )
+                                    .await;
+
+                                // flush bid acceptance over ws to client
+                                for (_, s) in self.server_client_senders.iter() {
+                                    s.send(server::SendWssMessage::ReceivedBidAcceptance {
+                                        query_id,
+                                    });
+                                }
+
+                                sender.send(Ok(()));
+                            }
+                            None => {
+                                debug!(
+                                    "(IndexerRequest::AcceptBid) Failed to find bid in user bids for query id {:?}",
+                                    query_id
+                                );
+                                sender.send(Err(anyhow::anyhow!("Failed!")));
+                            }
+                        }
                     }
                     network::IndexerRequest::PlaceBid(bid_recv) => {
                         let bid_with_status: BidReceivedWithStatus = bid_recv.into();
@@ -290,6 +322,18 @@ impl Indexer {
                             .add_request_response_peer(
                                 bid_with_status.bid_recv.bidder_id.clone(),
                                 bid_with_status.bid_recv.bidder_addr.clone(),
+                            )
+                            .await;
+
+                        // send ack back to peer
+                        self.network_client
+                            .send_dse_message_response(
+                                request_id,
+                                network::DseMessageResponse::Indexer(
+                                    network::IndexerResponse::AckBid(
+                                        bid_with_status.bid_recv.query_id.clone(),
+                                    ),
+                                ),
                             )
                             .await;
 
@@ -306,17 +350,50 @@ impl Indexer {
                         }
 
                         debug!(
-                        "indexer: received bid for query_id {:?} from bidder {:?} with addr {:?} ",
-                        bid_with_status.bid_recv.bid.query_id, bid_with_status.bid_recv.bidder_id, bid_with_status.bid_recv.bidder_addr
-                    );
+                            "(IndexerRequest::PlaceBid) received bid for query_id {:?} from bidder {:?} with addr {:?} ",
+                            bid_with_status.bid_recv.bid.query_id, bid_with_status.bid_recv.bidder_id, bid_with_status.bid_recv.bidder_addr
+                        );
                         sender.send(Ok(()));
                     }
                     network::IndexerRequest::StartCommit(query_id) => {
                         debug!(
-                            "received start commit for query_id {:?} from peer {:?} ",
+                            "(IndexerRequest::StartCommit) received for query_id {:?} from peer {:?} ",
                             query_id, peer_id
                         );
-                        sender.send(Ok(()));
+
+                        match self
+                            .database
+                            .find_query_bid_with_status(&query_id, &peer_id)
+                        {
+                            Some(bid) => {
+                                // check that bid is on status Accepted
+                                if bid.bid_status == BidStatus::Accepted {
+                                    // TODO start commitment procedure
+                                    // probably notify server clients
+
+                                    // ack start commit to bidder
+                                    self.network_client
+                                        .send_dse_message_response(
+                                            request_id,
+                                            network::DseMessageResponse::Indexer(
+                                                network::IndexerResponse::AckStartCommit(
+                                                    query_id.clone(),
+                                                ),
+                                            ),
+                                        )
+                                        .await;
+
+                                    sender.send(Ok(()));
+                                } else {
+                                    debug!("(IndexerRequest::StartCommit) Bid by bidder id {:?} for query id {:?} hasn't been accepted", peer_id, query_id);
+                                    sender.send(Err(anyhow::anyhow!("Failed!")));
+                                }
+                            }
+                            None => {
+                                debug!("(IndexerRequest::StartCommit) Bid from bidder {:?} for query id {:?} not found" , peer_id, query_id);
+                                sender.send(Err(anyhow::anyhow!("Failed!")));
+                            }
+                        }
                     }
                 }
             }
@@ -341,7 +418,7 @@ impl Indexer {
                             if let Ok((peer_id, address)) =
                                 self.network_client.network_details().await
                             {
-                                debug!("received new query from server - {:?} ", query);
+                                debug!("(ServerEvent::ReceivedMessage::NewQuery) received new query from server - {:?} ", query);
                                 let id = self.query_counter.fetch_add(1, Ordering::Relaxed);
                                 let query_recv = QueryReceived {
                                     id: id.try_into().expect("indexer: Query limit reached"),
@@ -357,31 +434,44 @@ impl Indexer {
                                         query_recv,
                                     ))
                                     .await;
+
+                                let _ = sender.send(Ok(()));
                             } else {
                             }
                         }
                         ReceivedMessage::PlaceBid { bid } => {
-                            if let Ok((peer_id, address)) =
+                            if let Ok((node_peer_id, address)) =
                                 self.network_client.network_details().await
                             {
                                 let bid_recv = BidReceived {
-                                    bidder_id: peer_id,
+                                    bidder_id: node_peer_id,
                                     bidder_addr: address,
                                     query_id: bid.query_id,
-                                    bid,
+                                    bid: bid.clone(),
                                 };
-                                let _ = self
+
+                                match self
                                     .network_client
                                     .send_dse_message_request(
-                                        peer_id,
+                                        bid_recv.bid.requester_id,
                                         network::DseMessageRequest::Indexer(
                                             network::IndexerRequest::PlaceBid(bid_recv.clone()),
                                         ),
                                     )
-                                    .await;
+                                    .await
+                                {
+                                    Ok(_) => {
+                                        // add bid to database
+                                        self.database.insert_user_bid_wth_status(&bid_recv.into());
 
-                                // add bid to database
-                                self.database.insert_user_bid_wth_status(&bid_recv.into());
+                                        debug!("(ServerEvent::ReceivedMessage::PlaceBid) Placing bid for query id {:?} to requester id {:?} success", bid.query_id.clone(), bid.requester_id.clone());
+                                        sender.send(Ok(()));
+                                    }
+                                    Err(e) => {
+                                        error!("(ServerEvent::ReceivedMessage::PlaceBid) Placing bid for query id {:?} to requester id {:?} failed with error: {:?}", bid.query_id.clone(), bid.requester_id.clone(), e);
+                                        sender.send(Err(anyhow::anyhow!("Failed!")));
+                                    }
+                                }
                             } else {
                             }
                         }
@@ -390,44 +480,108 @@ impl Indexer {
                             bidder_id,
                         } => {
                             // check such a bid by bidder for query exists
-                            match self.database.find_query_bids_with_status(&query_id) {
-                                Ok(mut bids) => {
-                                    if let Some(bid) =
-                                        bids.iter_mut().find(|b| b.bid_recv.bidder_id == bidder_id)
-                                    {
-                                        if bid.bid_recv.query_id == query_id {
-                                            self.network_client
-                                                .send_dse_message_request(
-                                                    bid.bid_recv.bidder_id,
-                                                    network::DseMessageRequest::Indexer(
-                                                        network::IndexerRequest::AcceptBid(
-                                                            query_id,
-                                                        ),
-                                                    ),
-                                                )
-                                                .await;
+                            match self
+                                .database
+                                .find_query_bid_with_status(&query_id, &bidder_id)
+                            {
+                                Some(mut bid) => {
+                                    if bid.bid_recv.query_id == query_id {
+                                        match self
+                                            .network_client
+                                            .send_dse_message_request(
+                                                bid.bid_recv.bidder_id,
+                                                network::DseMessageRequest::Indexer(
+                                                    network::IndexerRequest::AcceptBid(query_id),
+                                                ),
+                                            )
+                                            .await
+                                        {
+                                            Ok(_) => {
+                                                debug!("(ServerEvent::ReceivedMessage::AcceptBid) DSE Accept bid message to bidder id {:?} for query {:?} success", bid.bid_recv.bidder_id.clone(), query_id.clone());
+                                                // Update bid status to accepted
+                                                // FIXME: change to update afterward,
+                                                // to prevent uncessarily adding bid
+                                                // when it didn't existed (using API)
+                                                bid.update_status(BidStatus::Accepted);
+                                                self.database.insert_received_bid_with_status(&bid);
 
-                                            // Update bid status to accepted
-                                            // FIXME: change to update afterward,
-                                            // to prevent uncessarily adding bid
-                                            // when it didn't existed (using API)
-                                            bid.update_status(BidStatus::Accepted);
-                                            self.database.insert_user_bid_wth_status(bid);
-                                        } else {
-                                            // TODO send error that bid does not exists
+                                                let _ = sender.send(Ok(()));
+                                            }
+                                            Err(e) => {
+                                                error!(
+                                                    "(ServerEvent::ReceivedMessage::AcceptBid) DSE Accept Bid request failed with error {:?}",
+                                                    e
+                                                );
+                                                sender.send(Err(anyhow::anyhow!(
+                                                    "DSE Accept Bid request failed!"
+                                                )));
+                                            }
                                         }
                                     } else {
-                                        // TODO send error that bid does not exists
+                                        sender.send(Err(anyhow::anyhow!(
+                                            "Query Id does not match with Bid's query id"
+                                        )));
                                     }
                                 }
-                                Err(e) => {
-                                    // TODO send error
+                                None => {
+                                    error!("(ServerEvent::ReceivedMessage::AcceptBid) failed to find bid from bidder id {:?} for query id {:?}", bidder_id, query_id);
+                                    sender.send(Err(anyhow::anyhow!(
+                                        "Bid with bidder id does not exists"
+                                    )));
                                 }
                             }
+                        }
+                        ReceivedMessage::StartCommit { query_id } => {
+                            // check user bid exists & is on status Accepted
+                            match self.database.find_user_bid_with_status(&query_id) {
+                                Some(mut bid) => {
+                                    // check status is Accepted
+                                    if bid.bid_status == BidStatus::Accepted {
+                                        match self
+                                            .network_client
+                                            .send_dse_message_request(
+                                                bid.bid_recv.bid.requester_id,
+                                                network::DseMessageRequest::Indexer(
+                                                    network::IndexerRequest::StartCommit(
+                                                        query_id.clone(),
+                                                    ),
+                                                ),
+                                            )
+                                            .await
+                                        {
+                                            Ok(_) => {
+                                                debug!("(ServerEvent::ReceivedMessage::StartCommit) DSE Start commit message to requester id {:?} for query {:?} success", bid.bid_recv.bid.requester_id.clone(), bid.bid_recv.query_id.clone());
 
-                            // update its status
-
-                            // send acceptance to the bidder
+                                                // TODO commitment client to start commit
+                                                sender.send(Ok(()));
+                                            }
+                                            Err(e) => {
+                                                error!(
+                                                    "(ServerEvent::ReceivedMessage::StartCommit) DSE Start commit request failed with error {:?}",
+                                                    e
+                                                );
+                                                sender.send(
+                                                    (Err(anyhow::anyhow!(
+                                                        "DSE Start commit request failed"
+                                                    ))),
+                                                );
+                                            }
+                                        }
+                                    } else {
+                                        error!("(ServerEvent::ReceivedMessage::StartCommit) Bid for query id {:?} hasn't been accepted",
+                                            query_id
+                                        );
+                                        sender.send(Err(anyhow::anyhow!("Failed!")));
+                                    }
+                                }
+                                None => {
+                                    debug!(
+                                        "(ServerEvent::ReceivedMessage::StartCommit) Failed to find bid in user bids for query id {:?}",
+                                        query_id
+                                    );
+                                    sender.send(Err(anyhow::anyhow!("Failed!")));
+                                }
+                            }
                         }
                         _ => {}
                     },

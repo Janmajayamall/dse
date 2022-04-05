@@ -35,6 +35,9 @@ pub enum SendWssMessage {
 
     /// notify client received query
     ReceivedQuery { query: indexer::QueryReceived },
+
+    /// notify client of bid acceptance
+    ReceivedBidAcceptance { query_id: indexer::QueryId },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -106,9 +109,15 @@ pub async fn new(indexer_client: indexer::Client, db: database::Database, port: 
         .and(with_database(db.clone()))
         .and_then(handle_get_recvqueries);
 
+    let get_bids_of_query = warp::get()
+        .and(warp::path!("querybids" / u32))
+        .and(with_database(db.clone()))
+        .and_then(handle_get_querybids);
+
     let main = post_action
         .or(get_user_queries)
         .or(get_recv_queries)
+        .or(get_bids_of_query)
         .or(ws_main);
 
     warp::serve(main).run(([127, 0, 0, 1], port)).await;
@@ -117,11 +126,18 @@ pub async fn new(indexer_client: indexer::Client, db: database::Database, port: 
 async fn handle_post(
     recv_message: ReceivedMessage,
     mut indexer_client: indexer::Client,
-) -> Result<impl warp::Reply, std::convert::Infallible> {
-    let _ = indexer_client
+) -> Result<Box<dyn warp::Reply>, std::convert::Infallible> {
+    match indexer_client
         .handle_server_event(ServerEvent::ReceivedMessage(recv_message))
-        .await;
-    Ok(http::StatusCode::OK)
+        .await
+    {
+        Ok(_) => Ok(Box::new(http::StatusCode::OK)),
+        Err(e) => {
+            error!("(post: action) errored with {:?}", e);
+            Ok(Box::new(http::StatusCode::INTERNAL_SERVER_ERROR))
+        }
+    }
+
     // match recv_message {
 
     //     ReceivedWssMessage::NewQuery { query } => {
@@ -161,6 +177,19 @@ async fn handle_get_recvqueries(
         Ok(queries) => Ok(Box::new(warp::reply::json(&queries))),
         Err(e) => {
             error!("(get: userqueries) errored with {:?}", e);
+            Ok(Box::new(http::StatusCode::INTERNAL_SERVER_ERROR))
+        }
+    }
+}
+
+async fn handle_get_querybids(
+    query_id: u32,
+    db: database::Database,
+) -> Result<Box<dyn warp::Reply>, std::convert::Infallible> {
+    match db.find_query_bids_with_status(&query_id) {
+        Ok(bids) => Ok(Box::new(warp::reply::json(&bids))),
+        Err(e) => {
+            error!("(get: querybids) errored with {:?}", e);
             Ok(Box::new(http::StatusCode::INTERNAL_SERVER_ERROR))
         }
     }

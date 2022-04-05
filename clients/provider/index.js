@@ -1,26 +1,89 @@
 const { io } = require("socket.io-client");
 const axios = require("axios");
+const fetch = require("node-fetch");
 
-const PORT = 3000;
-const baseUrl = `http://127.0.0.1:${PORT}`;
-console.log(baseUrl, " this is the ba");
+const baseUrl = `http://127.0.0.1:${process.env.PORT}`;
 const baseInstance = axios.create({
-	baseUrl: "http://127.0.0.1:3000",
+	baseUrl: baseUrl,
 	timeout: 10000,
 	headers: { "Content-Type": "application/json" },
+	Proxy: undefined,
 });
 
-async function sendQuery() {
-	const { data } = await baseInstance.request({
-		url: "/newquery",
-		method: "POST",
-		data: {
-			query: "jdiwajdioa",
-		},
+async function sendQuery(query) {
+	const res = await fetch(`${baseUrl}/action`, {
+		method: "post",
+		body: JSON.stringify({ NewQuery: { query: { query: query } } }),
+		headers: { "Content-Type": "application/json" },
 	});
+	console.log(await res);
 }
+
+async function sendBid(queryId, requesterId) {
+	const res = await fetch(`${baseUrl}/action`, {
+		method: "post",
+		body: JSON.stringify({
+			PlaceBid: {
+				bid: {
+					query_id: queryId,
+					requester_id: requesterId,
+					charge: "0x16345785D8A0000",
+				},
+			},
+		}),
+		headers: { "Content-Type": "application/json" },
+	});
+	console.log(await res.text());
+}
+
+async function acceptBid(queryId, bidderId) {
+	const res = await fetch(`${baseUrl}/action`, {
+		method: "post",
+		body: JSON.stringify({
+			AcceptBid: {
+				query_id: queryId,
+				bidder_id: bidderId,
+			},
+		}),
+		headers: { "Content-Type": "application/json" },
+	});
+	console.log(await res.text());
+}
+
+async function startCommit(queryId) {
+	const res = await fetch(`${baseUrl}/action`, {
+		method: "post",
+		body: JSON.stringify({
+			StartCommit: {
+				query_id: queryId,
+			},
+		}),
+		headers: { "Content-Type": "application/json" },
+	});
+	console.log(await res.text());
+}
+
+async function receivedQueries() {
+	const res = await fetch(`${baseUrl}/recvqueries`, {
+		method: "get",
+	});
+	console.log(await res.json());
+}
+
+async function getQueryBids(queryId) {
+	const res = await fetch(`${baseUrl}/querybids/${queryId}`, {
+		method: "get",
+	});
+	console.log(await res.json());
+}
+
 (async () => {
-	await sendQuery();
+	// await sendQuery("yolo2");
+	// await receivedQueries();
+	// await sendBid(1, "16Uiu2HAm4ro25Yb85MzJcDdfTyks4NEgLSBTTnHs4UPcAmPg65ah");
+	// await getQueryBids(1);
+	// await acceptBid(1, "16Uiu2HAmEpzDCMgkaKyv2MxV2ScbSagAn6bcis88G7w5QoWfQD6h");
+	// await startCommit(1);
 })();
 
 // const socket = io(`${baseUrl}/connect`);

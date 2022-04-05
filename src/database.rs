@@ -1,3 +1,4 @@
+use libp2p::PeerId;
 use log::{debug, error, info};
 use serde::{Deserialize, Serialize};
 use sled::{Config, Db};
@@ -22,7 +23,7 @@ impl Database {
             .main
             .open_tree(b"user_queries")
             .expect("db: failed to read user queries");
-        user_queries.insert(query.id.to_le_bytes(), bincode::serialize(&query).unwrap());
+        user_queries.insert(query.id.to_be_bytes(), bincode::serialize(&query).unwrap());
     }
 
     pub fn insert_user_bid_wth_status(&mut self, bid: &indexer::BidReceivedWithStatus) {
@@ -32,7 +33,7 @@ impl Database {
             .open_tree(b"user_bids")
             .expect("db: failed to read user bids");
         user_bids.insert(
-            bid.bid_recv.query_id.to_le_bytes(),
+            bid.bid_recv.query_id.to_be_bytes(),
             bincode::serialize(&bid).unwrap(),
         );
     }
@@ -48,15 +49,36 @@ impl Database {
 
     pub fn insert_received_bid_with_status(&mut self, bid: &indexer::BidReceivedWithStatus) {
         debug!("inserting received bid {:?}", bid);
-        let tree_id = bid.bid_recv.query_id.to_be_bytes();
         let query_bids = self
             .main
-            .open_tree(tree_id)
+            .open_tree(bid.bid_recv.query_id.to_be_bytes())
             .expect("db: failed to read query bids");
         query_bids.insert(
             bid.bid_recv.bidder_id.to_bytes(),
             bincode::serialize(&bid).unwrap(),
         );
+    }
+
+    pub fn find_user_bids_with_status(
+        &self,
+    ) -> Result<Vec<indexer::BidReceivedWithStatus>, anyhow::Error> {
+        let mut all_bids = Vec::<indexer::BidReceivedWithStatus>::new();
+        let user_bids = self.main.open_tree(b"user_bids")?;
+        for val in &user_bids {
+            let (_, bid) = val?;
+            all_bids.push(bincode::deserialize::<indexer::BidReceivedWithStatus>(&bid).unwrap());
+        }
+        Ok(all_bids)
+    }
+
+    pub fn find_user_bid_with_status(
+        &self,
+        query_id: &indexer::QueryId,
+    ) -> Option<indexer::BidReceivedWithStatus> {
+        match self.find_user_bids_with_status() {
+            Ok(mut bids) => bids.into_iter().find(|b| b.bid_recv.query_id == *query_id),
+            Err(e) => None,
+        }
     }
 
     pub fn find_user_queries(&self) -> Result<Vec<indexer::QueryReceived>, anyhow::Error> {
@@ -91,6 +113,19 @@ impl Database {
             all_bids.push(bincode::deserialize::<indexer::BidReceivedWithStatus>(&bid).unwrap());
         }
         Ok(all_bids)
+    }
+
+    pub fn find_query_bid_with_status(
+        &self,
+        query_id: &indexer::QueryId,
+        bidder_id: &PeerId,
+    ) -> Option<indexer::BidReceivedWithStatus> {
+        match self.find_query_bids_with_status(query_id) {
+            Ok(mut bids) => bids
+                .into_iter()
+                .find(|b| b.bid_recv.bidder_id == *bidder_id),
+            Err(e) => None,
+        }
     }
 }
 

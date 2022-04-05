@@ -474,7 +474,7 @@ impl NetworkInterface {
                     .add_address(&peer_id, peer_addr.clone());
                 let _ = sender.send(Ok(()));
                 debug!(
-                    "request_response: peer added with peerId {:?} multiAddr {:?}",
+                    "(request_response) peer added with peerId {:?} multiAddr {:?}",
                     peer_id, peer_addr
                 );
             }

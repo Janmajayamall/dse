@@ -12,6 +12,21 @@ To make sure every exchange is trustless, DSE uses 2 of 2 scorched earth mechani
 
 To enable an active p2p marketplace that allows for providers to service queries of as cheap as few cents with high frequency, exchanges happen off-chain. This is done by using time-locked commitments (backed by time-locked wallets on-chain) + state channels as means of payments.
 
+Services that you can imagine being offered on DSE
+
+-   Providing high quality data in a specific domain
+-   Vertical search engines
+-   Factually correct news aggregation
+-   Dataseet for training purposes
+-   Services for different gigs (code, data collection & labelling, articles, etc.)
+-   Data inference on well trained models
+-   Service for finding your anonymity score on internet
+-   p2p exchange of goods
+
+How about the ppl that work for optimsing Ads at google & fb could spend sometime build a indexer in a specialised domain and put it on service on DSE?
+
+They can potentially earn good amount of money. This does not have to be full-time gig, but sort of a fun gig.
+
 ## Spec
 
 DSE p2p network uses -

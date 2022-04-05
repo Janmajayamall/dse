@@ -205,7 +205,7 @@ impl Procedure {
                                         if query_id == self.request.query_id() && self.is_valid_round_request(round) {
                                             match self.find_commitment_for_round(round, self.round_commitment_type(round, self.request.is_requester)).await {
                                                 Ok(commitment) => {
-                                                    debug!("commit procedure: sending commit {:?} for round {:?} for query_id {:?}", commitment.clone(), round, query_id);
+                                                    debug!("(commit procedure) sending commit {:?} for round {:?} for query_id {:?}", commitment.clone(), round, query_id);
                                                     // send response to the request
                                                     let _ = self.network_client.send_dse_message_response(request_id, network::DseMessageResponse::Commit(
                                                         network::CommitResponse::CommitFund {
@@ -236,7 +236,7 @@ impl Procedure {
                                 sender
                             } => {
                                 if query_id == self.request.query_id() {
-                                    debug!("commit procedure: end command received for query {:?}", query_id.clone());
+                                    debug!("(commit procedure) end command received for query {:?}", query_id.clone());
                                     let _ = sender.send(Ok((
                                         self.commitments_sent.clone().into_values().collect(),
                                         self.commitments_received.clone().into_values().collect(),
@@ -258,7 +258,7 @@ impl Procedure {
             let mut interval = time::interval(time::Duration::from_secs(10));
             interval.tick().await;
 
-            debug!("commit procedure: time to process commit for query_id {:?}", self.request.query_id());
+            debug!("(commit procedure) time to process commit for query_id {:?}", self.request.query_id());
 
             if self.peer_wallet.wallet_address != Address::default() && self.peer_wallet.owner_address != Address::default() {
                 // figure out the index to ask for (i.e. round)
@@ -271,7 +271,7 @@ impl Procedure {
                     // counter party might ask for pending commits from 
                     // self.
                     // TODO: notify main to wait for service
-                    debug!("commit procedure: all commits have been received for query_id {:?}", self.request.query_id());
+                    debug!("(commit procedure) all commits have been received for query_id {:?}", self.request.query_id());
                 }else {
                     // send round request
                     match self.network_client.send_dse_message_request(self.request.counter_party_peer_id(), network::DseMessageRequest::Commit(network::CommitRequest::CommitFund { query_id: self.request.query_id(), round} )).await {
@@ -283,7 +283,7 @@ impl Procedure {
                                     commitment
                                 }) => {                                        
                                         if query_id == self.request.query_id() {
-                                            debug!("commit procedure: received commit for query_id {:?} for round {:?}", query_id.clone(), round.clone());
+                                            debug!("(commit procedure) received commit for query_id {:?} for round {:?}", query_id.clone(), round.clone());
                                             // TODO check validity on chain and in DHT
 
                                             // TODO check index is valid according to peer's wallet
@@ -321,7 +321,7 @@ impl Procedure {
                     match res {
                         network::DseMessageResponse::Commit(network::CommitResponse::WalletAddress { query_id, wallet_address }) => {
                             if query_id == self.request.query_id() {
-                                    debug!("commit procedure: received peer wallet_address {:?} for query_id {:?}", wallet_address.clone(), query_id.clone());
+                                    debug!("(commit procedure) received peer wallet_address {:?} for query_id {:?}", wallet_address.clone(), query_id.clone());
                                     self.peer_wallet = PeerWallet {
                                         wallet_address,
                                         // TODO query this from on-chain
@@ -383,11 +383,11 @@ impl Procedure {
     /// are of T2.
     fn round_commitment_type(&self, round: u32, is_requester: bool) -> RoundType {
         // requester's commitments are of type 2 after round/2
-        if is_requester == true && round  >= (self.rounds()/2) {
+        if is_requester && round  >= (self.rounds()/2) {
             return RoundType::T2
         }
 
-        return RoundType::T1;
+         RoundType::T1
     }
 
     /// Returns total number of commitment rounds
@@ -401,7 +401,7 @@ impl Procedure {
         // is 1*10**16 (i.e. cent). Make it configurable.
         // Amount to be committed by requester = charge * 2
         // Amount to be committed by provider = charge 
-        ((self.request.bid.bid.charge * U256::from_str("2").unwrap()) / U256::from_str("10000000").unwrap()).as_u32()
+        ((self.request.bid.bid.charge * U256::from_str("2").unwrap()) / U256::from_str("10000000000000000").unwrap()).as_u32()
     }
 
     // Returns commitment of the node 

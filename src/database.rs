@@ -25,18 +25,38 @@ impl Database {
         user_queries.insert(query.id.to_le_bytes(), bincode::serialize(&query).unwrap());
     }
 
+    pub fn insert_user_bid_wth_status(&mut self, bid: &indexer::BidReceivedWithStatus) {
+        debug!("inserting user bid with status {:?}", bid);
+        let user_bids = self
+            .main
+            .open_tree(b"user_bids")
+            .expect("db: failed to read user bids");
+        user_bids.insert(
+            bid.bid_recv.query_id.to_le_bytes(),
+            bincode::serialize(&bid).unwrap(),
+        );
+    }
+
     pub fn insert_received_query(&mut self, query: &indexer::QueryReceived) {
         debug!("inserting received query {:?}", query);
         let user_queries = self
             .main
             .open_tree(b"user_received_queries")
             .expect("db: failed to read user received queries");
-        user_queries.insert(query.id.to_le_bytes(), bincode::serialize(&query).unwrap());
+        user_queries.insert(query.id.to_be_bytes(), bincode::serialize(&query).unwrap());
     }
 
-    pub fn insert_received_bid(&mut self, bid: &indexer::BidReceived) {
+    pub fn insert_received_bid_with_status(&mut self, bid: &indexer::BidReceivedWithStatus) {
         debug!("inserting received bid {:?}", bid);
-        
+        let tree_id = bid.bid_recv.query_id.to_be_bytes();
+        let query_bids = self
+            .main
+            .open_tree(tree_id)
+            .expect("db: failed to read query bids");
+        query_bids.insert(
+            bid.bid_recv.bidder_id.to_bytes(),
+            bincode::serialize(&bid).unwrap(),
+        );
     }
 
     pub fn find_user_queries(&self) -> Result<Vec<indexer::QueryReceived>, anyhow::Error> {
@@ -51,14 +71,26 @@ impl Database {
     }
 
     pub fn find_recv_queries(&self) -> Result<Vec<indexer::QueryReceived>, anyhow::Error> {
-        let mut all_queries: Vec<indexer::QueryReceived> = Vec::new();
+        let mut all_queries = Vec::<indexer::QueryReceived>::new();
         let queries = self.main.open_tree(b"user_received_queries")?;
         for val in &queries {
             let (id, query) = val?;
-            let query = bincode::deserialize::<indexer::QueryReceived>(&query).unwrap();
-            all_queries.push(query);
+            all_queries.push(bincode::deserialize::<indexer::QueryReceived>(&query).unwrap());
         }
         Ok(all_queries)
+    }
+
+    pub fn find_query_bids_with_status(
+        &self,
+        query_id: &indexer::QueryId,
+    ) -> Result<Vec<indexer::BidReceivedWithStatus>, anyhow::Error> {
+        let mut all_bids = Vec::<indexer::BidReceivedWithStatus>::new();
+        let bids = self.main.open_tree(query_id.to_be_bytes())?;
+        for val in &bids {
+            let (id, bid) = val?;
+            all_bids.push(bincode::deserialize::<indexer::BidReceivedWithStatus>(&bid).unwrap());
+        }
+        Ok(all_bids)
     }
 }
 

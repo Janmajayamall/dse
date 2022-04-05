@@ -66,7 +66,7 @@ async fn main() -> Result<(), Box<dyn error::Error>> {
             .await
             .expect("network::new failed");
     let database = database::new(network_interface.keypair.public().to_peer_id().to_base58());
-    let (indexer_event_receiver, indexer_interface, server_event_sender) = indexer::new(
+    let (indexer_event_receiver, indexer_interface) = indexer::new(
         network_client.clone(),
         commitment_client.clone(),
         indexer_c_receiver,
@@ -82,7 +82,7 @@ async fn main() -> Result<(), Box<dyn error::Error>> {
     tokio::spawn(indexer_interface.run());
     tokio::spawn(commitment_interface.run());
     tokio::spawn(server::new(
-        server_event_sender,
+        indexer_client.clone(),
         database.clone(),
         opt.server_port,
     ));
@@ -134,29 +134,12 @@ async fn main() -> Result<(), Box<dyn error::Error>> {
                            },
                            network::NetworkEvent::DseMessageRequestRecv {peer_id, request_id, request} => {
                                 match request {
-                                    network::DseMessageRequest::PlaceBid(bid_recv) => {
-                                        // send AckBid response
-                                        // TODO handle case when send dse message
-                                        // response fails.
-                                        let _  = network_client.send_dse_message_response(request_id, network::DseMessageResponse::AckBid(bid_recv.query_id)).await;
-
-                                        // TODO handle in case or err
-                                        let _ = indexer_client.handle_received_bid(bid_recv).await;
+                                    network::DseMessageRequest::Indexer (indexer_request) => {
+                                        let _ = indexer_client.handle_received_request(peer_id, indexer_request, request_id).await;
                                     },
-                                    network::DseMessageRequest::AcceptBid(query_id) => {
-                                        // send ack
-                                        // TODO handle err
-                                        let _ = network_client.send_dse_message_response(request_id, network::DseMessageResponse::AckAcceptBid(query_id)).await;
-
-                                        let _ = indexer_client.handle_received_bid_acceptance(query_id, peer_id).await;
-                                    },
-                                    network::DseMessageRequest::StartCommit(query_id) => {
-                                        // send ack
-                                        let _ = network_client.send_dse_message_response(request_id, network::DseMessageResponse::AckStartCommit(query_id)).await;
-
-                                        let _ = indexer_client.handle_received_start_commit(query_id, peer_id).await;
-
-                                    },
+                                    network::DseMessageRequest::Commit (commit_request) => {
+                                        let _ = commitment_client.handle_received_request(peer_id, commit_request, request_id).await;
+                                    }
 
                                     _ => {}
                                 }

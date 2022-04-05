@@ -317,11 +317,10 @@ impl Procedure {
                 }
             }else {
                 // ask for counter wallet address
-                match self.network_client.send_dse_message_request(self.request.counter_party_peer_id(),  network::DseMessageRequest::WalletAddress(self.request.query_id())).await {
-                    Ok(res) => {
-                        match res {
-                            network::DseMessageResponse::WalletAddress { query_id, wallet_address } => {
-                                if query_id == self.request.query_id() {
+                if let Ok(res) = self.network_client.send_dse_message_request(self.request.counter_party_peer_id(),  network::DseMessageRequest::Commit(network::CommitRequest::WalletAddress(self.request.query_id()))).await {
+                    match res {
+                        network::DseMessageResponse::Commit(network::CommitResponse::WalletAddress { query_id, wallet_address }) => {
+                            if query_id == self.request.query_id() {
                                     debug!("commit procedure: received peer wallet_address {:?} for query_id {:?}", wallet_address.clone(), query_id.clone());
                                     self.peer_wallet = PeerWallet {
                                         wallet_address,
@@ -329,12 +328,11 @@ impl Procedure {
                                         owner_address: Address::default(),
                                     }
                                 }
-                            },
-                            _ => {}
-                        };
-                    },
-                    Err(_)=> {}
+                        },
+                        _ => {}
+                    }
                 }
+
             }
         }
         
@@ -459,6 +457,7 @@ pub enum Command {
     },
     /// Received a request over network
     ReceivedRequest{
+        peer_id: PeerId,
         request: network::CommitRequest,
         request_id: request_response::RequestId,
         sender: oneshot::Sender<Result<(), anyhow::Error>>,
@@ -482,14 +481,6 @@ pub struct Client {
 }   
 
 impl Client {
-    pub fn new(
-        command_sender: mpsc::Sender<Command>,
-    ) -> Self {
-        Self {
-            command_sender,
-        }
-    }
-
     pub async fn start_commit_procedure(&mut self, request: Request) -> Result<(), anyhow::Error> {
         let (sender, receiver) = oneshot::channel();
         self.command_sender.send(
@@ -501,10 +492,11 @@ impl Client {
         receiver.await.expect("Client response dropped")
     }
 
-    pub async fn handle_received_request(&mut self, request: network::CommitRequest, request_id: request_response::RequestId ) -> Result<(), anyhow::Error> {
+    pub async fn handle_received_request(&mut self,peer_id: PeerId, request: network::CommitRequest, request_id: request_response::RequestId ) -> Result<(), anyhow::Error> {
         let (sender, receiver) = oneshot::channel();
         self.command_sender.send(
             Command::ReceivedRequest {
+                peer_id,
                 request,
                 request_id,
                 sender
@@ -670,6 +662,7 @@ impl Commitment {
     pub async fn command_handler(&mut self, command: Command) {
         match command {
             Command::ReceivedRequest {
+                peer_id,
                 request_id,
                 request,
                 sender

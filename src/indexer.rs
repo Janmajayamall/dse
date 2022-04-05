@@ -1,4 +1,4 @@
-use libp2p::{Multiaddr, PeerId};
+use libp2p::{request_response, Multiaddr, PeerId};
 use log::{debug, error, info};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -35,6 +35,28 @@ pub struct BidReceived {
     pub bidder_addr: Multiaddr,
     pub query_id: QueryId,
     pub bid: Bid,
+}
+
+#[derive(Deserialize, Serialize, Debug, Clone, PartialEq)]
+pub enum BidStatus {
+    PendingAcceptance,
+    Accepted,
+    Service,
+}
+
+#[derive(Deserialize, Serialize, Debug, Clone, PartialEq)]
+pub struct BidReceivedWithStatus {
+    pub bid_recv: BidReceived,
+    pub bid_status: BidStatus,
+}
+
+impl From<BidReceived> for BidReceivedWithStatus {
+    fn from(bid_recv: BidReceived) -> Self {
+        Self {
+            bid_recv,
+            bid_status: BidStatus::PendingAcceptance,
+        }
+    }
 }
 
 impl BidReceived {
@@ -80,6 +102,16 @@ pub enum Command {
         peer_id: PeerId,
         sender: oneshot::Sender<Result<(), anyhow::Error>>,
     },
+    ReceivedRequest {
+        request: network::IndexerRequest,
+        request_id: request_response::RequestId,
+        peer_id: PeerId,
+        sender: oneshot::Sender<Result<(), anyhow::Error>>,
+    },
+    ReceivedServerEvent {
+        server_event: server::ServerEvent,
+        sender: oneshot::Sender<Result<(), anyhow::Error>>,
+    },
 }
 
 #[derive(Debug)]
@@ -106,18 +138,6 @@ pub struct Client {
 
 // Client receives commands and forwards them
 impl Client {
-    pub async fn handle_received_bid(
-        &mut self,
-        bid_recv: BidReceived,
-    ) -> Result<(), anyhow::Error> {
-        let (sender, receiver) = oneshot::channel();
-        self.command_sender
-            .send(Command::ReceivedBid { bid_recv, sender })
-            .await
-            .expect("Command message dropped");
-        receiver.await.expect("Command response dropped")
-    }
-
     pub async fn handle_received_query(
         &mut self,
         query_recv: QueryReceived,
@@ -130,15 +150,17 @@ impl Client {
         receiver.await.expect("Command response dropped")
     }
 
-    pub async fn handle_received_bid_acceptance(
+    pub async fn handle_received_request(
         &mut self,
-        query_id: QueryId,
         peer_id: PeerId,
+        request: network::IndexerRequest,
+        request_id: request_response::RequestId,
     ) -> Result<(), anyhow::Error> {
         let (sender, receiver) = oneshot::channel();
         self.command_sender
-            .send(Command::ReceivedBidAcceptance {
-                query_id,
+            .send(Command::ReceivedRequest {
+                request,
+                request_id,
                 peer_id,
                 sender,
             })
@@ -147,16 +169,14 @@ impl Client {
         receiver.await.expect("Command response dropped")
     }
 
-    pub async fn handle_received_start_commit(
+    pub async fn handle_server_event(
         &mut self,
-        query_id: QueryId,
-        peer_id: PeerId,
+        server_event: server::ServerEvent,
     ) -> Result<(), anyhow::Error> {
         let (sender, receiver) = oneshot::channel();
         self.command_sender
-            .send(Command::ReceivedStartCommit {
-                query_id,
-                peer_id,
+            .send(Command::ReceivedServerEvent {
+                server_event,
                 sender,
             })
             .await
@@ -172,10 +192,8 @@ pub struct Indexer {
     command_receiver: mpsc::Receiver<Command>,
     /// FIX - I think this is useless
     event_sender: mpsc::Sender<IndexerEvent>,
-    /// Receives events from the server
-    server_event_receiver: mpsc::Receiver<server::ServerEvent>,
-    /// Sends events to server
-    server_client_senders: HashMap<usize, mpsc::UnboundedSender<warp::ws::Message>>,
+    /// Sends events to server clients over websocket
+    server_client_senders: HashMap<usize, mpsc::UnboundedSender<server::SendWssMessage>>,
     /// network client
     network_client: network::Client,
     /// commitment client
@@ -190,7 +208,7 @@ impl Indexer {
     pub fn new(
         command_receiver: mpsc::Receiver<Command>,
         event_sender: mpsc::Sender<IndexerEvent>,
-        server_event_receiver: mpsc::Receiver<server::ServerEvent>,
+
         network_client: network::Client,
         commitment_client: commitment::Client,
         database: database::Database,
@@ -198,7 +216,7 @@ impl Indexer {
         Self {
             command_receiver,
             event_sender,
-            server_event_receiver,
+
             server_client_senders: Default::default(),
             network_client,
             commitment_client,
@@ -216,12 +234,7 @@ impl Indexer {
                         None => {}
                     }
                 },
-                event = self.server_event_receiver.recv() => {
-                    match event {
-                        Some(e) => self.server_event_handler(e).await,
-                        None => {}
-                    }
-                }
+
             }
         }
     }
@@ -229,20 +242,6 @@ impl Indexer {
     // TODO convert indexer command messages to websocket messages
     pub async fn command_handler(&mut self, command: Command) {
         match command {
-            Command::ReceivedBid { bid_recv, sender } => {
-                self.network_client
-                    .add_request_response_peer(
-                        bid_recv.bidder_id.clone(),
-                        bid_recv.bidder_addr.clone(),
-                    )
-                    .await;
-                // TODO something with the query
-                sender.send(Ok(()));
-                debug!(
-                    "indexer: received bid for query_id {:?} from bidder {:?} with addr {:?} ",
-                    bid_recv.bid.query_id, bid_recv.bidder_id, bid_recv.bidder_addr
-                );
-            }
             Command::ReceivedQuery { query_recv, sender } => {
                 self.network_client
                     .add_request_response_peer(
@@ -256,90 +255,140 @@ impl Indexer {
 
                 // inform server clients
                 for (_, client_sender) in self.server_client_senders.iter() {
-                    client_sender.send(Message::binary(serde_json::to_vec(&query_recv).unwrap()));
+                    client_sender.send(server::SendWssMessage::ReceivedQuery {
+                        query: query_recv.clone(),
+                    });
                 }
                 sender.send(Ok(()));
                 debug!("indexer: received query with query_id {:?} from requester {:?} with addr {:?} ", query_recv.id, query_recv.requester_id, query_recv.requester_addr);
             }
-            Command::ReceivedBidAcceptance {
-                query_id,
+
+            Command::ReceivedRequest {
+                request,
+                request_id,
                 peer_id,
                 sender,
             } => {
-                sender.send(Ok(()));
-                debug!(
-                    "indexer: received bid acceptance for query_id {:?} from requester {:?} ",
-                    query_id, peer_id
-                );
+                match request {
+                    network::IndexerRequest::AcceptBid(query_id) => {
+                        debug!(
+                            "received bid acceptance for query_id {:?} from requester {:?} ",
+                            query_id, peer_id
+                        );
+                        sender.send(Ok(()));
+                    }
+                    network::IndexerRequest::PlaceBid(bid_recv) => {
+                        let bid_with_status: BidReceivedWithStatus = bid_recv.into();
+
+                        self.network_client
+                            .add_request_response_peer(
+                                bid_with_status.bid_recv.bidder_id.clone(),
+                                bid_with_status.bid_recv.bidder_addr.clone(),
+                            )
+                            .await;
+
+                        // store bid in db
+                        self.database
+                            .insert_received_bid_with_status(&bid_with_status);
+
+                        // inform server clients
+                        for (_, client_sender) in self.server_client_senders.iter() {
+                            client_sender.send(server::SendWssMessage::ReceivedBid {
+                                bid: bid_with_status.clone(),
+                                query_id: bid_with_status.bid_recv.query_id.clone(),
+                            });
+                        }
+
+                        debug!(
+                        "indexer: received bid for query_id {:?} from bidder {:?} with addr {:?} ",
+                        bid_with_status.bid_recv.bid.query_id, bid_with_status.bid_recv.bidder_id, bid_with_status.bid_recv.bidder_addr
+                    );
+                        sender.send(Ok(()));
+                    }
+                    network::IndexerRequest::StartCommit(query_id) => {
+                        debug!(
+                            "received start commit for query_id {:?} from peer {:?} ",
+                            query_id, peer_id
+                        );
+                        sender.send(Ok(()));
+                    }
+                }
             }
-            Command::ReceivedStartCommit {
-                query_id,
-                peer_id,
+            Command::ReceivedServerEvent {
+                server_event,
                 sender,
             } => {
-                // notify wallet for commitment
-                sender.send(Ok(()));
-                debug!(
-                    "indexer: received start commit for query_id {:?} from peer {:?} ",
-                    query_id, peer_id
-                );
+                use server::{ReceivedMessage, ServerEvent};
+                match server_event {
+                    ServerEvent::NewWsClient {
+                        client_id,
+                        client_sender,
+                    } => {
+                        self.server_client_senders.insert(client_id, client_sender);
+                    }
+                    ServerEvent::NewWsMessage { client_id, message } => {
+                        // TODO handle message
+                        // request node id using indexer event of RequestNodeMultiAddr
+                    }
+                    ServerEvent::ReceivedMessage(message) => match message {
+                        ReceivedMessage::NewQuery { query } => {
+                            if let Ok((peer_id, address)) =
+                                self.network_client.network_details().await
+                            {
+                                debug!("received new query from server - {:?} ", query);
+                                let id = self.query_counter.fetch_add(1, Ordering::Relaxed);
+                                let query_recv = QueryReceived {
+                                    id: id.try_into().expect("indexer: Query limit reached"),
+                                    requester_id: peer_id,
+                                    requester_addr: address,
+                                    query,
+                                };
+
+                                self.database.insert_user_query(&query_recv);
+
+                                self.network_client
+                                    .publish_message(network::GossipsubMessage::NewQuery(
+                                        query_recv,
+                                    ))
+                                    .await;
+                            } else {
+                            }
+                        }
+                        ReceivedMessage::PlaceBid { bid } => {
+                            if let Ok((peer_id, address)) =
+                                self.network_client.network_details().await
+                            {
+                                let bid_recv = BidReceived {
+                                    bidder_id: peer_id,
+                                    bidder_addr: address,
+                                    query_id: bid.query_id,
+                                    bid,
+                                };
+                                let _ = self
+                                    .network_client
+                                    .send_dse_message_request(
+                                        peer_id,
+                                        network::DseMessageRequest::Indexer(
+                                            network::IndexerRequest::PlaceBid(bid_recv.clone()),
+                                        ),
+                                    )
+                                    .await;
+
+                                // add bid to database
+                                self.database.insert_user_bid_wth_status(&bid_recv.into());
+                            } else {
+                            }
+                        }
+                        ReceivedMessage::AcceptBid {
+                            query_id,
+                            bidder_id,
+                        } => {}
+                        _ => {}
+                    },
+                }
             }
             _ => {}
         }
-    }
-
-    pub async fn server_event_handler(&mut self, event: server::ServerEvent) {
-        use server::ServerEvent;
-        match event {
-            ServerEvent::NewWsClient {
-                client_id,
-                client_sender,
-            } => {
-                self.server_client_senders.insert(client_id, client_sender);
-            }
-            ServerEvent::NewWsMessage { client_id, message } => {
-                // TODO handle message
-                // request node id using indexer event of RequestNodeMultiAddr
-            }
-            ServerEvent::NewQuery { query } => match self.network_client.network_details().await {
-                Ok((peer_id, address)) => {
-                    debug!("received new query from server - {:?} ", query);
-                    let id = self.query_counter.fetch_add(1, Ordering::Relaxed);
-                    let query_recv = QueryReceived {
-                        id: id.try_into().expect("indexer: Query limit reached"),
-                        requester_id: peer_id,
-                        requester_addr: address,
-                        query,
-                    };
-
-                    self.database.insert_user_query(&query_recv);
-
-                    self.network_client
-                        .publish_message(network::GossipsubMessage::NewQuery(query_recv))
-                        .await;
-                }
-                Err(_) => {}
-            },
-            ServerEvent::PlaceBid { bid } => match self.network_client.network_details().await {
-                Ok((peer_id, address)) => {
-                    let _ = self
-                        .network_client
-                        .send_dse_message_request(
-                            peer_id,
-                            network::DseMessageRequest::PlaceBid(BidReceived {
-                                bidder_id: peer_id,
-                                bidder_addr: address,
-                                query_id: bid.query_id,
-                                bid,
-                            }),
-                        )
-                        .await;
-                }
-                Err(_) => {}
-            },
-            _ => {}
-        }
-        // self.event_sender.send(event).await.expect("Indexer event message dropped!");
     }
 }
 
@@ -348,24 +397,17 @@ pub fn new(
     commitment_client: commitment::Client,
     command_receiver: mpsc::Receiver<Command>,
     database: database::Database,
-) -> (
-    mpsc::Receiver<IndexerEvent>,
-    Indexer,
-    mpsc::Sender<server::ServerEvent>,
-) {
+) -> (mpsc::Receiver<IndexerEvent>, Indexer) {
     let (indexer_event_sender, indexer_event_receiver) = mpsc::channel::<IndexerEvent>(10);
-    let (server_event_sender, server_event_receeiver) = mpsc::channel::<server::ServerEvent>(10);
 
     return (
         indexer_event_receiver,
         Indexer::new(
             command_receiver,
             indexer_event_sender,
-            server_event_receeiver,
             network_client,
             commitment_client,
             database,
         ),
-        server_event_sender,
     );
 }

@@ -972,84 +972,76 @@ impl GossipsubTopic {
 
 #[derive(Deserialize, Serialize, Debug, Clone, PartialEq)]
 pub enum CommitRequest {
-    // Ask for commitment
+    /// Ask for wallet address
+    WalletAddress(indexer::QueryId),
+    /// Ask for commitment
     CommitFund {
         query_id: indexer::QueryId,
         round: u32,
     },
-    // Invalidating Signature
-    // Sent by service requester
+    /// Invalidating Signature
+    /// Sent by service requester
     InvalidatingSignature {
         query_id: indexer::QueryId,
         invalidating_signature: ethers::types::Signature,
     },
-    // End commit procedure
+    /// End commit procedure
     EndCommit(indexer::QueryId),
 }
 
 #[derive(Deserialize, Serialize, Debug, Clone, PartialEq)]
 pub enum CommitResponse {
-    // CommitFund response
+    /// Wallet address response
+    WalletAddress {
+        query_id: indexer::QueryId,
+        wallet_address: ethers::types::Address,
+    },
+    /// CommitFund response
     CommitFund {
         query_id: indexer::QueryId,
         round: u32,
         commitment: commitment::Commit,
     },
-    // Ack InvalidatingSignature
+    /// Ack InvalidatingSignature
     AckInvalidatingSignature(indexer::QueryId),
-    // Ack End Commit
+    /// Ack End Commit
     AckEndCommit(indexer::QueryId),
 }
 
 #[derive(Deserialize, Serialize, Debug, Clone, PartialEq)]
-pub enum IndexRequest {
-    // Place bid for a query
+pub enum IndexerRequest {
+    /// Place bid for a query
     PlaceBid(indexer::BidReceived),
-    // Accept a bid for a query
+    /// Accept a bid for a query
     AcceptBid(indexer::QueryId),
-    // Start commit procedure
+    /// Start commit procedure
     StartCommit(indexer::QueryId),
 }
 
 #[derive(Deserialize, Serialize, Debug, Clone, PartialEq)]
-pub enum IndexResponse {
-    // Ack that bid was received
+pub enum IndexerResponse {
+    /// Ack that bid was received
     AckBid(indexer::QueryId),
-    // Ack that bid acceptance was received
+    /// Ack that bid acceptance was received
     AckAcceptBid(indexer::QueryId),
-    // Ack that start commit was received
+    /// Ack that start commit was received
     AckStartCommit(indexer::QueryId),
 }
 
 // All stuff related to request response
 #[derive(Deserialize, Serialize, Debug, Clone, PartialEq)]
 pub enum DseMessageRequest {
-    // Place bid for a query
-    PlaceBid(indexer::BidReceived),
-    // Accept a bid for a query
-    AcceptBid(indexer::QueryId),
-    // Start commit procedure
-    StartCommit(indexer::QueryId),
-    // Ask for wallet address
-    WalletAddress(indexer::QueryId),
-    // Requests related to commit fund
+    /// Requests related to indexer
+    Indexer(IndexerRequest),
+    /// Requests related to commit fund
     Commit(CommitRequest),
 }
 
 #[derive(Deserialize, Serialize, Debug, Clone, PartialEq)]
 pub enum DseMessageResponse {
-    // Ack that bid was received
-    AckBid(indexer::QueryId),
-    // Ack that bid acceptance was received
-    AckAcceptBid(indexer::QueryId),
-    // Ack that start commit was received
-    AckStartCommit(indexer::QueryId),
-    // Wallet address response
-    WalletAddress {
-        query_id: indexer::QueryId,
-        wallet_address: ethers::types::Address,
-    },
-    // Respons related to commit fund
+    /// Responses related to indexer
+    Indexer(IndexerResponse),
+    /// Responss related to commit fund
     Commit(CommitResponse),
 }
 

@@ -50,6 +50,12 @@ pub struct BidReceivedWithStatus {
     pub bid_status: BidStatus,
 }
 
+impl BidReceivedWithStatus {
+    fn update_status(&mut self, to: BidStatus) {
+        self.bid_status = to;
+    }
+}
+
 impl From<BidReceived> for BidReceivedWithStatus {
     fn from(bid_recv: BidReceived) -> Self {
         Self {
@@ -382,7 +388,47 @@ impl Indexer {
                         ReceivedMessage::AcceptBid {
                             query_id,
                             bidder_id,
-                        } => {}
+                        } => {
+                            // check such a bid by bidder for query exists
+                            match self.database.find_query_bids_with_status(&query_id) {
+                                Ok(mut bids) => {
+                                    if let Some(bid) =
+                                        bids.iter_mut().find(|b| b.bid_recv.bidder_id == bidder_id)
+                                    {
+                                        if bid.bid_recv.query_id == query_id {
+                                            self.network_client
+                                                .send_dse_message_request(
+                                                    bid.bid_recv.bidder_id,
+                                                    network::DseMessageRequest::Indexer(
+                                                        network::IndexerRequest::AcceptBid(
+                                                            query_id,
+                                                        ),
+                                                    ),
+                                                )
+                                                .await;
+
+                                            // Update bid status to accepted
+                                            // FIXME: change to update afterward,
+                                            // to prevent uncessarily adding bid
+                                            // when it didn't existed (using API)
+                                            bid.update_status(BidStatus::Accepted);
+                                            self.database.insert_user_bid_wth_status(bid);
+                                        } else {
+                                            // TODO send error that bid does not exists
+                                        }
+                                    } else {
+                                        // TODO send error that bid does not exists
+                                    }
+                                }
+                                Err(e) => {
+                                    // TODO send error
+                                }
+                            }
+
+                            // update its status
+
+                            // send acceptance to the bidder
+                        }
                         _ => {}
                     },
                 }

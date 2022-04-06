@@ -82,9 +82,9 @@ impl Commit {
 
 #[derive(Debug, Clone)]
 pub struct Request {  
-    is_requester: bool,
-    bid: indexer::BidReceived,
-    query: indexer::QueryReceived,
+    pub is_requester: bool,
+    pub bid: indexer::BidReceived,
+    pub query: indexer::QueryReceived,
 }
 
 impl Request {
@@ -132,6 +132,7 @@ pub enum ProcedureCommand {
     /// Process requst received over
     /// network for query 
     ReceivedRequest {
+        peer_id: PeerId,
         request_id: request_response::RequestId,
         request: network::CommitRequest,
     }
@@ -189,73 +190,8 @@ impl Procedure {
     ) -> Result<(), anyhow::Error>{
         debug!("commit procedure: procedure start for query_id {:?}", self.request.query_id());
         loop {
-            select! {
-                command = self.command_receiver.recv() => {
-                    if let Some(c) = command {
-                        match c {
-                            ProcedureCommand::ReceivedRequest {
-                                request_id,
-                                request,
-                            } => {
-                                match request { 
-                                    network::CommitRequest::CommitFund {
-                                        query_id,
-                                        round,
-                                    } => {
-                                        if query_id == self.request.query_id() && self.is_valid_round_request(round) {
-                                            match self.find_commitment_for_round(round, self.round_commitment_type(round, self.request.is_requester)).await {
-                                                Ok(commitment) => {
-                                                    debug!("(commit procedure) sending commit {:?} for round {:?} for query_id {:?}", commitment.clone(), round, query_id);
-                                                    // send response to the request
-                                                    let _ = self.network_client.send_dse_message_response(request_id, network::DseMessageResponse::Commit(
-                                                        network::CommitResponse::CommitFund {
-                                                            query_id,
-                                                            round,
-                                                            commitment
-                                                        }
-                                                    )).await;
-                                                },
-                                                Err(_) => {
-                                                    // TOOD: unable to find index to commit.
-                                                    // Behaviour for this case is still unknown
-                                                }
-                                            }
-                                        }
-                                    },
-                                    network::CommitRequest::InvalidatingSignature {
-                                        query_id,
-                                        invalidating_signature,
-                                    } => {
 
-                                    },  
-                                    _ => {}
-                                }
-                            },
-                            ProcedureCommand::End {
-                                query_id,
-                                sender
-                            } => {
-                                if query_id == self.request.query_id() {
-                                    debug!("(commit procedure) end command received for query {:?}", query_id.clone());
-                                    let _ = sender.send(Ok((
-                                        self.commitments_sent.clone().into_values().collect(),
-                                        self.commitments_received.clone().into_values().collect(),
-                                    )));
-
-                                    // END procedure
-                                    return Ok(());
-
-                                }else {
-                                    let _ = sender.send(Err(Box::new(anyhow::anyhow!("Wrong query id!"))));
-                                }
-                            },
-                            _ => {}
-                        }
-                    }
-                }
-            } 
-            
-            let mut interval = time::interval(time::Duration::from_secs(10));
+              let mut interval = time::interval(time::Duration::from_secs(1));
             interval.tick().await;
 
             debug!("(commit procedure) time to process commit for query_id {:?}", self.request.query_id());
@@ -317,8 +253,8 @@ impl Procedure {
                 }
             }else {
                 // ask for counter wallet address
-                if let Ok(res) = self.network_client.send_dse_message_request(self.request.counter_party_peer_id(),  network::DseMessageRequest::Commit(network::CommitRequest::WalletAddress(self.request.query_id()))).await {
-                    match res {
+                match self.network_client.send_dse_message_request(self.request.counter_party_peer_id(),  network::DseMessageRequest::Commit(network::CommitRequest::WalletAddress(self.request.query_id()))).await {
+                    Ok(res) => {match res {
                         network::DseMessageResponse::Commit(network::CommitResponse::WalletAddress { query_id, wallet_address }) => {
                             if query_id == self.request.query_id() {
                                     debug!("(commit procedure) received peer wallet_address {:?} for query_id {:?}", wallet_address.clone(), query_id.clone());
@@ -327,13 +263,112 @@ impl Procedure {
                                         // TODO query this from on-chain
                                         owner_address: Address::default(),
                                     }
+                                }else{
+                                    error!("(commit procedure) received peer wallet_address {:?} for query_id {:?}, but was requested for query id {:?}", wallet_address.clone(), query_id.clone(), self.request.query_id());
                                 }
                         },
-                        _ => {}
+                        _ => {
+                            error!("(commit procedure) DSE WalletAddress request to peer id {:?} for query_id {:?} failed", self.request.counter_party_peer_id(),  self.request.query_id());
+                        }
+                    }},
+                    Err(e) => {
+                        error!("(commit procedure) DSE WalletAddress request to peer id {:?} for query_id {:?} failed with error: {:?}", self.request.counter_party_peer_id(),  self.request.query_id(), e);
                     }
                 }
 
             }
+
+            select! {
+                command = self.command_receiver.recv() => {
+                    if let Some(c) = command {
+                        match c {
+                            ProcedureCommand::ReceivedRequest {
+                                peer_id,
+                                request_id,
+                                request,
+                            } => {
+                                match request { 
+                                    network::CommitRequest::CommitFund {
+                                        query_id,
+                                        round,
+                                    } => {
+                                        if query_id == self.request.query_id() && self.is_valid_round_request(round) {
+                                            match self.find_commitment_for_round(round, self.round_commitment_type(round, self.request.is_requester)).await {
+                                                Ok(commitment) => {
+                                                    debug!("(commit procedure) sending commit {:?} for round {:?} for query_id {:?}", commitment.clone(), round, query_id);
+                                                    // send response to the request
+                                                    match self.network_client.send_dse_message_response(request_id, network::DseMessageResponse::Commit(
+                                                        network::CommitResponse::CommitFund {
+                                                            query_id,
+                                                            round,
+                                                            commitment:commitment.clone(),
+                                                        }
+                                                    )).await {
+                                                        Ok(_) => {
+                                                            debug!("(commit procedure) DSE CommitFund response {:?} for round {:?} for query_id {:?} sent", commitment.clone(), round, query_id);
+                                                        },
+
+                                                        Err(e)=> {
+                                                            error!("(commit procedure) DSE CommitFund response {:?} for round {:?} for query_id {:?} failed with error: {:?}", commitment.clone(), round, query_id, e);
+                                                        }
+                                                    }
+                                                },
+                                                Err(_) => {
+                                                   error!("(commit procedure) unable to find commitment for round {:?} for query_id {:?}",  round, query_id);
+                                                }
+                                            }
+                                        }
+                                    },
+                                    network::CommitRequest::InvalidatingSignature {
+                                        query_id,
+                                        invalidating_signature,
+                                    } => {
+
+                                    },  
+                                    network::CommitRequest::WalletAddress (query_id) => {
+                                        debug!("(commit procedure) DSE WalletAddres request received from peer id {:?} for query id {:?}", peer_id, query_id);
+                                        if peer_id == self.request.counter_party_peer_id() {
+                                            match  self.network_client.send_dse_message_response(request_id, network::DseMessageResponse::Commit(network::CommitResponse::WalletAddress {
+                                            query_id,
+                                            wallet_address: self.node.timelocked_wallet
+                                        })).await {
+                                            Ok(_) => {
+                                                debug!("(commit procedure) DSE WalletAddress response sent to peer id {:?} for query id {:?}", peer_id, query_id);
+                                            },
+                                            Err(e) => {
+                                                error!("(commit procedure) DSE WalletAddress response to peer id {:?} for query id {:?} failed with error: {:?}",  peer_id, query_id, e);
+                                            }
+                                        }
+                                        }else {
+                                            error!("(commit procedure) DSE WalletAddress for query id {:?} was received from peer id {:?} but countery party peer id is {:?}", query_id,peer_id ,self.request.counter_party_peer_id())
+                                        }
+                                    }
+                                    _ => {}
+                                }
+                            },
+                            ProcedureCommand::End {
+                                query_id,
+                                sender
+                            } => {
+                                if query_id == self.request.query_id() {
+                                    debug!("(commit procedure) end command received for query {:?}", query_id.clone());
+                                    let _ = sender.send(Ok((
+                                        self.commitments_sent.clone().into_values().collect(),
+                                        self.commitments_received.clone().into_values().collect(),
+                                    )));
+
+                                    // END procedure
+                                    return Ok(());
+
+                                }else {
+                                    let _ = sender.send(Err(Box::new(anyhow::anyhow!("Wrong query id!"))));
+                                }
+                            },
+                            _ => {}
+                        }
+                    }
+                }
+            } 
         }
         
     }
@@ -544,7 +579,7 @@ pub struct Commitment {
         mpsc::Sender<ProcedureCommand>
     )>,
     /// Indexes not used for commitment
-    unused_indexes: VecDeque<u32>,
+    unused_indexes: Vec<u32>,
     /// Indexes spent on T2 commits
     type2_spent_commits: HashMap<indexer::QueryId, Vec<Commit>>,
     /// T1 commitments received 
@@ -565,13 +600,19 @@ impl Commitment {
     ) -> Self {
         let (procedure_request_sender, procedure_request_receiver) = mpsc::channel(10);
 
+        // FIX: dummy temp  indexes 
+        let mut unused_indexes = Vec::<u32>::new();
+        for v in 1..100 {
+            unused_indexes.push(v);
+        }
+
         Self {
             command_receiver,
             network_client,
             procedure_request_sender,
             procedure_request_receiver,
             ongoing_procedures: Default::default(),
-            unused_indexes: Default::default(),
+            unused_indexes: unused_indexes,
             type2_spent_commits: Default::default(),
             type1_recv_commitments: Default::default(),
             type2_recv_commitments: Default::default(),
@@ -583,26 +624,11 @@ impl Commitment {
 
     pub async fn run(mut self) {
         loop {
-            select! {
-                command = self.command_receiver.recv() => {
-                    match command {
-                        Some(c) => {self.command_handler(c).await},
-                        None => {}
-                    }
-                },
-                event = self.procedure_request_receiver.recv() => {
-                    match event {
-                        Some(e) => {self.procedure_requests(e).await},
-                        None => {}
-                    }
-                }
-            }
-
             // Every 20 seconds or so check which commit procedures should be ended
             let mut interval = time::interval(time::Duration::from_secs(20));
             interval.tick().await;
             
-            debug!("commitment: time to close commit procedures");
+            debug!("(commitment) time to close commit procedures");
 
             let mut remove_set: HashSet<indexer::QueryId> = HashSet::new();
             for (query_id, (request, m_sender)) in self.ongoing_procedures.iter() {
@@ -621,7 +647,7 @@ impl Commitment {
                             for commit in res.0.iter() {
                                 if commit.c_type == RoundType::T1 {
                                     // t1 indexes are free to be used again
-                                    self.unused_indexes.push_back(commit.index);
+                                    self.unused_indexes.push(commit.index);
                                 }else {
                                     t2_spent_commits.push(commit.clone());
                                 }
@@ -655,6 +681,22 @@ impl Commitment {
 
             // remove ongoing_procedures in remove_set
             self.ongoing_procedures.retain(|&k, _| !remove_set.contains(&k));
+
+
+            select! {
+                command = self.command_receiver.recv() => {
+                    match command {
+                        Some(c) => {self.command_handler(c).await},
+                        None => {}
+                    }
+                },
+                event = self.procedure_request_receiver.recv() => {
+                    match event {
+                        Some(e) => {self.procedure_requests(e).await},
+                        None => {}
+                    }
+                }
+            }
 
         }
     }
@@ -698,6 +740,23 @@ impl Commitment {
                             Some((_, sender)) => {
                                 sender.send(
                                     ProcedureCommand::ReceivedRequest {
+                                        peer_id,
+                                        request_id,
+                                        request,
+                                    }
+                                ).await;
+                            }, 
+                            None => {}
+                        }
+                    },
+                    network::CommitRequest::WalletAddress (
+                        query_id,
+                    ) => {
+                        match self.ongoing_procedures.get(&query_id) {
+                            Some((_, sender)) => {
+                                sender.send(
+                                    ProcedureCommand::ReceivedRequest {
+                                        peer_id,
                                         request_id,
                                         request,
                                     }
@@ -772,7 +831,7 @@ impl Commitment {
     }
 
     pub fn find_index(&mut self, query_id: indexer::QueryId) -> Option<u32> {
-        self.unused_indexes.pop_front()
+        self.unused_indexes.pop()
     }
 
     // // range usage is disabled for now
@@ -803,31 +862,6 @@ pub fn new(
 ) -> Commitment {
     Commitment::new(command_receiver, network_client, node)
 }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 
 

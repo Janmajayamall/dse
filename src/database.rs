@@ -102,6 +102,16 @@ impl Database {
         Ok(all_queries)
     }
 
+    pub fn find_recv_query_by_query_id(
+        &self,
+        query_id: &indexer::QueryId,
+    ) -> Option<indexer::QueryReceived> {
+        match self.find_recv_queries() {
+            Ok(queries) => queries.into_iter().find(|q| q.id == *query_id),
+            Err(_) => None,
+        }
+    }
+
     pub fn find_query_bids_with_status(
         &self,
         query_id: &indexer::QueryId,

@@ -82,8 +82,8 @@ async function getQueryBids(queryId) {
 	// await receivedQueries();
 	// await sendBid(1, "16Uiu2HAm4ro25Yb85MzJcDdfTyks4NEgLSBTTnHs4UPcAmPg65ah");
 	// await getQueryBids(1);
-	// await acceptBid(1, "16Uiu2HAmEpzDCMgkaKyv2MxV2ScbSagAn6bcis88G7w5QoWfQD6h");
-	// await startCommit(1);
+	// await acceptBid(1, "16Uiu2HAmMjYbNBrHYx9K7MgQnfRaUgKPZeRV1zvPxttCFxGSzasN");
+	await startCommit(1);
 })();
 
 // const socket = io(`${baseUrl}/connect`);

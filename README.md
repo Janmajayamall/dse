@@ -23,9 +23,9 @@ Services that you can imagine being offered on DSE
 -   Service for finding your anonymity score on internet
 -   p2p exchange of goods
 
-How about the ppl that work for optimsing Ads at google & fb could spend sometime build a indexer in a specialised domain and put it on service on DSE?
+<!-- How about the ppl that work for optimsing Ads at google & fb could spend sometime build a indexer in a specialised domain and put it on service on DSE?
 
-They can potentially earn good amount of money. This does not have to be full-time gig, but sort of a fun gig.
+They can potentially earn good amount of money. This does not have to be full-time gig, but sort of a fun gig. -->
 
 ## Spec
 

@@ -21,10 +21,10 @@ pub struct Query {
 #[derive(Deserialize, Serialize, Debug, Clone, PartialEq)]
 pub struct Bid {
     pub query_id: QueryId,
-    // peer id of query requester
-    // to whom this bid is placed
+    /// peer id of query requester
+    /// to whom this bid is placed
     pub requester_id: PeerId,
-    // charge for query in cents
+    /// charge for query in cents
     pub charge: ethers::types::U256,
 }
 
@@ -34,6 +34,12 @@ pub struct BidReceived {
     pub bidder_addr: Multiaddr,
     pub query_id: QueryId,
     pub bid: Bid,
+    /// The query for which is bid is
+    /// placed.
+    ///  
+    /// FIX: remove query_id in favour of
+    /// this
+    pub query: QueryReceived,
 }
 
 #[derive(Deserialize, Serialize, Debug, Clone, PartialEq)]
@@ -65,12 +71,13 @@ impl From<BidReceived> for BidReceivedWithStatus {
 }
 
 impl BidReceived {
-    pub fn from(bid: Bid, bidder_id: PeerId, bidder_addr: Multiaddr) -> Self {
+    pub fn from(bid: Bid, bidder_id: PeerId, bidder_addr: Multiaddr, query: QueryReceived) -> Self {
         Self {
             bid: bid.clone(),
             query_id: bid.query_id,
             bidder_id,
             bidder_addr,
+            query,
         }
     }
 }
@@ -368,7 +375,16 @@ impl Indexer {
                             Some(bid) => {
                                 // check that bid is on status Accepted
                                 if bid.bid_status == BidStatus::Accepted {
-                                    // TODO start commitment procedure
+                                    // Start commitment procedure.
+                                    // Since node is requester is_requester = true
+                                    self.commitment_client
+                                        .start_commit_procedure(commitment::Request {
+                                            is_requester: true,
+                                            bid: bid.bid_recv.clone(),
+                                            query: bid.bid_recv.query,
+                                        })
+                                        .await;
+
                                     // probably notify server clients
 
                                     // ack start commit to bidder
@@ -443,32 +459,46 @@ impl Indexer {
                             if let Ok((node_peer_id, address)) =
                                 self.network_client.network_details().await
                             {
-                                let bid_recv = BidReceived {
-                                    bidder_id: node_peer_id,
-                                    bidder_addr: address,
-                                    query_id: bid.query_id,
-                                    bid: bid.clone(),
-                                };
+                                // check that bid received is for a
+                                // already received query
+                                match self.database.find_recv_query_by_query_id(&bid.query_id) {
+                                    Some(query) => {
+                                        let bid_recv = BidReceived {
+                                            bidder_id: node_peer_id,
+                                            bidder_addr: address,
+                                            query_id: bid.query_id,
+                                            bid: bid.clone(),
+                                            query,
+                                        };
 
-                                match self
-                                    .network_client
-                                    .send_dse_message_request(
-                                        bid_recv.bid.requester_id,
-                                        network::DseMessageRequest::Indexer(
-                                            network::IndexerRequest::PlaceBid(bid_recv.clone()),
-                                        ),
-                                    )
-                                    .await
-                                {
-                                    Ok(_) => {
-                                        // add bid to database
-                                        self.database.insert_user_bid_wth_status(&bid_recv.into());
+                                        match self
+                                            .network_client
+                                            .send_dse_message_request(
+                                                bid_recv.bid.requester_id,
+                                                network::DseMessageRequest::Indexer(
+                                                    network::IndexerRequest::PlaceBid(
+                                                        bid_recv.clone(),
+                                                    ),
+                                                ),
+                                            )
+                                            .await
+                                        {
+                                            Ok(_) => {
+                                                // add bid to database
+                                                self.database
+                                                    .insert_user_bid_wth_status(&bid_recv.into());
 
-                                        debug!("(ServerEvent::ReceivedMessage::PlaceBid) Placing bid for query id {:?} to requester id {:?} success", bid.query_id.clone(), bid.requester_id.clone());
-                                        sender.send(Ok(()));
+                                                debug!("(ServerEvent::ReceivedMessage::PlaceBid) Placing bid for query id {:?} to requester id {:?} success", bid.query_id.clone(), bid.requester_id.clone());
+                                                sender.send(Ok(()));
+                                            }
+                                            Err(e) => {
+                                                error!("(ServerEvent::ReceivedMessage::PlaceBid) Placing bid for query id {:?} to requester id {:?} failed with error: {:?}", bid.query_id.clone(), bid.requester_id.clone(), e);
+                                                sender.send(Err(anyhow::anyhow!("Failed!")));
+                                            }
+                                        }
                                     }
-                                    Err(e) => {
-                                        error!("(ServerEvent::ReceivedMessage::PlaceBid) Placing bid for query id {:?} to requester id {:?} failed with error: {:?}", bid.query_id.clone(), bid.requester_id.clone(), e);
+                                    None => {
+                                        error!("(ServerEvent::ReceivedMessage::PlaceBid) Query Id {:?} referenced in Bid hasn't been received", bid.query_id);
                                         sender.send(Err(anyhow::anyhow!("Failed!")));
                                     }
                                 }
@@ -551,6 +581,16 @@ impl Indexer {
                                         {
                                             Ok(_) => {
                                                 debug!("(ServerEvent::ReceivedMessage::StartCommit) DSE Start commit message to requester id {:?} for query {:?} success", bid.bid_recv.bid.requester_id.clone(), bid.bid_recv.query_id.clone());
+
+                                                // Start commitment procedure.
+                                                // Since node is provider is_requester = false
+                                                self.commitment_client
+                                                    .start_commit_procedure(commitment::Request {
+                                                        is_requester: false,
+                                                        bid: bid.bid_recv.clone(),
+                                                        query: bid.bid_recv.query,
+                                                    })
+                                                    .await;
 
                                                 // TODO commitment client to start commit
                                                 sender.send(Ok(()));

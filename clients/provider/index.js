@@ -2,7 +2,7 @@ const { io } = require("socket.io-client");
 const axios = require("axios");
 const fetch = require("node-fetch");
 
-const baseUrl = `http://127.0.0.1:${process.env.PORT}`;
+const baseUrl = `http://127.0.0.1`;
 const baseInstance = axios.create({
 	baseUrl: baseUrl,
 	timeout: 10000,
@@ -10,8 +10,8 @@ const baseInstance = axios.create({
 	Proxy: undefined,
 });
 
-async function sendQuery(query) {
-	const res = await fetch(`${baseUrl}/action`, {
+async function sendQuery(query, port) {
+	const res = await fetch(`${baseUrl}:${port}/action`, {
 		method: "post",
 		body: JSON.stringify({ NewQuery: { query: { query: query } } }),
 		headers: { "Content-Type": "application/json" },
@@ -19,8 +19,8 @@ async function sendQuery(query) {
 	console.log(await res);
 }
 
-async function sendBid(queryId, requesterId) {
-	const res = await fetch(`${baseUrl}/action`, {
+async function sendBid(queryId, requesterId, port) {
+	const res = await fetch(`${baseUrl}:${port}/action`, {
 		method: "post",
 		body: JSON.stringify({
 			PlaceBid: {
@@ -36,8 +36,8 @@ async function sendBid(queryId, requesterId) {
 	console.log(await res.text());
 }
 
-async function acceptBid(queryId, bidderId) {
-	const res = await fetch(`${baseUrl}/action`, {
+async function acceptBid(queryId, bidderId, port) {
+	const res = await fetch(`${baseUrl}:${port}/action`, {
 		method: "post",
 		body: JSON.stringify({
 			AcceptBid: {
@@ -50,8 +50,8 @@ async function acceptBid(queryId, bidderId) {
 	console.log(await res.text());
 }
 
-async function startCommit(queryId) {
-	const res = await fetch(`${baseUrl}/action`, {
+async function startCommit(queryId, port) {
+	const res = await fetch(`${baseUrl}:${port}/action`, {
 		method: "post",
 		body: JSON.stringify({
 			StartCommit: {
@@ -63,27 +63,60 @@ async function startCommit(queryId) {
 	console.log(await res.text());
 }
 
-async function receivedQueries() {
-	const res = await fetch(`${baseUrl}/recvqueries`, {
+async function receivedQueries(port) {
+	const res = await fetch(`${baseUrl}:${port}/recvqueries`, {
 		method: "get",
 	});
 	console.log(await res.json());
 }
 
-async function getQueryBids(queryId) {
-	const res = await fetch(`${baseUrl}/querybids/${queryId}`, {
+async function getQueryBids(queryId, port) {
+	const res = await fetch(`${baseUrl}:${port}/querybids/${queryId}`, {
 		method: "get",
 	});
 	console.log(await res.json());
 }
 
 (async () => {
-	// await sendQuery("yolo2");
-	// await receivedQueries();
-	// await sendBid(1, "16Uiu2HAm4ro25Yb85MzJcDdfTyks4NEgLSBTTnHs4UPcAmPg65ah");
-	// await getQueryBids(1);
-	// await acceptBid(1, "16Uiu2HAmMjYbNBrHYx9K7MgQnfRaUgKPZeRV1zvPxttCFxGSzasN");
-	await startCommit(1);
+	const queryId = 1;
+	const requesterPort = 3000;
+	const providerPort = 5000;
+	const requesterPeerId =
+		"16Uiu2HAm4ro25Yb85MzJcDdfTyks4NEgLSBTTnHs4UPcAmPg65ah";
+	const providerPeerId =
+		"16Uiu2HAmQAujJB3QQbD6TLax71DTSaHAmN1MdGbqPzPh6dsSj3Wh";
+
+	const delay = 3;
+
+	// requester sends query
+	setTimeout(async () => {
+		await sendQuery("yolo2", requesterPort);
+	}, 0 * delay * 1000);
+
+	// provider receieves query
+	setTimeout(async () => {
+		await receivedQueries(providerPort);
+	}, 1 * delay * 1000);
+
+	// provider places a bid to requester for query
+	setTimeout(async () => {
+		await sendBid(queryId, requesterPeerId, providerPort);
+	}, 2 * delay * 1000);
+
+	// requester receives bid
+	setTimeout(async () => {
+		await getQueryBids(1, requesterPort);
+	}, 3 * delay * 1000);
+
+	// requester accepts the bid by provider
+	setTimeout(async () => {
+		await acceptBid(1, providerPeerId, requesterPort);
+	}, 4 * delay * 1000);
+
+	// provider sends start commit to requester
+	setTimeout(async () => {
+		await startCommit(queryId, providerPort);
+	}, 5 * delay * 1000);
 })();
 
 // const socket = io(`${baseUrl}/connect`);

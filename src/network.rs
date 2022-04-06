@@ -591,7 +591,7 @@ impl NetworkInterface {
                 }
                 None => {
                     sender.send(Err(Box::new(anyhow::anyhow!(
-                        "network: node does not have local address assigned"
+                        "(network) node does not have local address assigned"
                     ))));
                 }
             },
@@ -723,7 +723,7 @@ impl NetworkInterface {
                     request,
                     channel,
                 } => {
-                    debug!("request_response: Received request {:?} ", request.clone());
+                    // debug!("request_response: Received request {:?} ", request.clone());
                     self.response_channels_for_inbound_requests
                         .insert(request_id, channel);
                     self.network_event_sender
@@ -739,10 +739,10 @@ impl NetworkInterface {
                     request_id,
                     response,
                 } => {
-                    debug!(
-                        "request_response: Received response {:?} ",
-                        response.clone()
-                    );
+                    // debug!(
+                    //     "request_response: Received response {:?} ",
+                    //     response.clone()
+                    // );
                     self.pending_dse_outbound_message_requests
                         .remove(&request_id)
                         .expect("Outbound Request should be pending!")

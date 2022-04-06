@@ -17,6 +17,7 @@ mod ethnode;
 mod indexer;
 mod network;
 mod server;
+mod subscription;
 
 #[derive(Debug, StructOpt)]
 #[structopt(name = "DSE args")]

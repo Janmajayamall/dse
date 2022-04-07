@@ -1,6 +1,6 @@
 use anyhow::Ok;
 use ethers::prelude::*;
-use std::{sync::Arc, str::FromStr};
+use std::{str::FromStr, sync::Arc};
 
 use super::commitment;
 
@@ -18,18 +18,20 @@ pub struct EthNode {
 }
 
 impl EthNode {
-    pub fn new(rpc_endpoint: String, private_key: String, timelocked_wallet: types::Address) -> Result<Self, anyhow::Error> {
+    pub fn new(
+        rpc_endpoint: String,
+        private_key: String,
+        timelocked_wallet: types::Address,
+    ) -> Result<Self, anyhow::Error> {
         let client = Provider::<Http>::try_from(rpc_endpoint)?;
         let wallet = LocalWallet::from_str(&private_key)?;
-        
-        Ok(
-            Self {
-                client: Arc::new(client),
-                wallet,
-                timelocked_wallet,
-            }
-        )
-    }   
+
+        Ok(Self {
+            client: Arc::new(client),
+            wallet,
+            timelocked_wallet,
+        })
+    }
 
     pub async fn validate_commitment_index(self, index: u64, epoch: u64, wallet_address: Address) {
         let wallet = WalletContract::new(wallet_address, self.client.clone());
@@ -37,16 +39,13 @@ impl EthNode {
         // println!("EthNode: returned {:?}", value)
     }
 
-    
     pub fn sign_message(&self, message: types::H256) -> types::Signature {
         self.wallet.sign_hash(message, true)
     }
 
-    pub async fn get_current_epoch(&self) {
-
-    }
+    pub async fn get_current_epoch(&self) {}
 
     pub fn signer_address(&self) -> types::Address {
-        self.wallet.address()
+        types::Address::zero()
     }
 }

@@ -1,4 +1,4 @@
-use log::debug;
+use log::{debug, error};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use tokio::sync::{mpsc, oneshot};
 
@@ -14,16 +14,22 @@ pub enum Request {
     DhtGet,
 }
 
-#[derive(Debug, Clone, PartialEq)]
-pub struct Response {
-    pub dseMessageResponse: network::DseMessageResponse,
+#[derive(Debug)]
+pub enum Response {
+    DseRequest(network::DseMessageResponse),
+    Error(anyhow::Error),
+}
+
+#[derive(Debug)]
+pub struct ResponseWrapper {
     pub id: usize,
+    pub response: Response,
 }
 
 pub struct Subscription {
     global_id: AtomicUsize,
     network_client: network::Client,
-    sender: mpsc::Sender<Response>,
+    sender: mpsc::Sender<ResponseWrapper>,
 }
 
 impl Subscription {
@@ -38,24 +44,32 @@ impl Subscription {
             );
             match request {
                 Request::DseRequest { peer_id, message } => {
-                    match network_client
+                    let res = network_client
                         .send_dse_message_request(peer_id, message)
-                        .await
-                    {
-                        Ok(res) => {
-                            debug!(
-                                "(Request::DseRequest) request with id {:?} resolved with response {:?}",
-                                id, res
-                            );
+                        .await;
+                    match res {
+                        Ok(dse) => {
+                            debug!("(Request::DseRequest) request with id {:?} resolved", id);
                             sender
-                                .send(Response {
-                                    dseMessageResponse: res,
+                                .send(ResponseWrapper {
                                     id,
+                                    response: Response::DseRequest(dse),
                                 })
                                 .await;
                         }
-                        Err(_) => {}
-                    };
+                        Err(e) => {
+                            error!(
+                                "(Request::DseRequest) request with id {:?} failed with err {:?}",
+                                id, e
+                            );
+                            sender
+                                .send(ResponseWrapper {
+                                    id,
+                                    response: Response::Error(anyhow::anyhow!("failed!")),
+                                })
+                                .await;
+                        }
+                    }
                 }
                 _ => {}
             }
@@ -64,8 +78,8 @@ impl Subscription {
     }
 }
 
-pub fn new(network_client: network::Client) -> (mpsc::Receiver<Response>, Subscription) {
-    let (sender, receiver) = mpsc::channel::<Response>(10);
+pub fn new(network_client: network::Client) -> (mpsc::Receiver<ResponseWrapper>, Subscription) {
+    let (sender, receiver) = mpsc::channel::<ResponseWrapper>(10);
     (
         receiver,
         Subscription {

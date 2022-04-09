@@ -206,73 +206,9 @@ impl Procedure {
             "(commit procedure) procedure start for query_id {:?}",
             self.request.query_id()
         );
-        let mut interval = time::interval(time::Duration::from_secs(10));
+        let mut interval = time::interval(time::Duration::from_millis(100));
         loop {
             select! {
-                   _ = interval.tick() => {
-
-                    debug!(
-                        "(commit procedure) time to process commit for query_id {:?}",
-                        self.request.query_id()
-                    );
-
-                    // avoid sending DSE request if there's already a pending
-                    // subscription for one (atleast for now)
-                    if self.pending_susbscription_requests.is_empty() {
-                         if self.peer_wallet.wallet_address != Address::default()
-                                && self.peer_wallet.owner_address != Address::default()
-                            {
-                                // figure out the index to ask for (i.e. round)
-                                let round = self.next_expected_round();
-
-                                error!("THis is the round {}", round);
-
-                                if round == self.rounds() {
-                                    // All necessary commitments have been received,
-                                    // thus notify main.
-                                    // Note that we can't end thread rn, since the
-                                    // counter party might ask for pending commits from
-                                    // self.
-                                    // TODO: notify main to wait for service
-                                    debug!(
-                                        "(commit procedure) all commits have been received for query_id {:?}",
-                                        self.request.query_id()
-                                    );
-                                } else {
-                                    // send round request
-                                    debug!("(commit procedure) Sending DSE CommitFund request to peer id {:?} for query id {:?} for round {:?}", self.request.counter_party_peer_id(),self.request.query_id(), round);
-                                    let subscription_req = subscription::Request::DseRequest {
-                                        peer_id: self.request.counter_party_peer_id(),
-                                        message: network::DseMessageRequest::Commit(
-                                            network::CommitRequest::CommitFund {
-                                                query_id: self.request.query_id(),
-                                                round,
-                                            },
-                                        ),
-                                    };
-                                    let id = self.subscription_interface.start(subscription_req.clone());
-                                    self.pending_susbscription_requests
-                                        .insert(id, subscription_req);
-                                }
-                            } else {
-                                // ask for counter wallet address
-                                debug!("(commit procedure) Sending DSE WalletAddress request to peer id {:?} for query id {:?}", self.request.counter_party_peer_id(),self.request.query_id());
-                                let subscription_req = subscription::Request::DseRequest {
-                                    peer_id: self.request.counter_party_peer_id(),
-                                    message: network::DseMessageRequest::Commit(
-                                        network::CommitRequest::WalletAddress(self.request.query_id()),
-                                    ),
-                                };
-                                let id = self.subscription_interface.start(subscription_req.clone());
-                                self.pending_susbscription_requests
-                                    .insert(id, subscription_req);
-
-                            }
-                    }else{
-                        debug!("(commit procedure) Pending subcription for DSE message request");
-                    }
-                }
-
                 command = self.command_receiver.recv() => {
                     if let Some(c) = command {
                         match c {
@@ -428,7 +364,10 @@ impl Procedure {
                         error!("(commit procedure) unable to find pending subscription with id {}", response.id);
                     }
                 }
-
+                _ = interval.tick() => {
+                    debug!("Hello");
+                    self.handle().await;
+                }
             }
         }
     }
@@ -450,6 +389,68 @@ impl Procedure {
         }
 
         true
+    }
+
+    async fn handle(&mut self) {
+        debug!(
+            "(commit procedure) time to process commit for query_id {:?}",
+            self.request.query_id()
+        );
+
+        // avoid sending DSE request if there's already a pending
+        // subscription for one (atleast for now)
+        if self.pending_susbscription_requests.is_empty() {
+            if self.peer_wallet.wallet_address != Address::default()
+                && self.peer_wallet.owner_address != Address::default()
+            {
+                // figure out the index to ask for (i.e. round)
+                let round = self.next_expected_round();
+
+                error!("THis is the round {}", round);
+
+                if round == self.rounds() {
+                    // All necessary commitments have been received,
+                    // thus notify main.
+                    // Note that we can't end thread rn, since the
+                    // counter party might ask for pending commits from
+                    // self.
+                    // TODO: notify main to wait for service
+                    debug!(
+                        "(commit procedure) all commits have been received for query_id {:?}",
+                        self.request.query_id()
+                    );
+                } else {
+                    // send round request
+                    debug!("(commit procedure) Sending DSE CommitFund request to peer id {:?} for query id {:?} for round {:?}", self.request.counter_party_peer_id(),self.request.query_id(), round);
+                    let subscription_req = subscription::Request::DseRequest {
+                        peer_id: self.request.counter_party_peer_id(),
+                        message: network::DseMessageRequest::Commit(
+                            network::CommitRequest::CommitFund {
+                                query_id: self.request.query_id(),
+                                round,
+                            },
+                        ),
+                    };
+                    let id = self.subscription_interface.start(subscription_req.clone());
+                    self.pending_susbscription_requests
+                        .insert(id, subscription_req);
+                }
+            } else {
+                // ask for counter wallet address
+                debug!("(commit procedure) Sending DSE WalletAddress request to peer id {:?} for query id {:?}", self.request.counter_party_peer_id(),self.request.query_id());
+                let subscription_req = subscription::Request::DseRequest {
+                    peer_id: self.request.counter_party_peer_id(),
+                    message: network::DseMessageRequest::Commit(
+                        network::CommitRequest::WalletAddress(self.request.query_id()),
+                    ),
+                };
+                let id = self.subscription_interface.start(subscription_req.clone());
+                self.pending_susbscription_requests
+                    .insert(id, subscription_req);
+            }
+        } else {
+            debug!("(commit procedure) Pending subcription for DSE message request");
+        }
     }
 
     /// Lastest round for which commitment

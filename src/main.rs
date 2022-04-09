@@ -17,6 +17,7 @@ mod ethnode;
 mod indexer;
 mod network;
 mod server;
+mod storage;
 mod subscription;
 
 #[derive(Debug, StructOpt)]
@@ -116,6 +117,7 @@ async fn main() -> Result<(), Box<dyn error::Error>> {
                                listener_id,
                                address
                            } => {
+
 
                            },
                            network::NetworkEvent::Mdns(MdnsEvent::Discovered(list)) => {

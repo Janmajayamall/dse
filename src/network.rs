@@ -169,7 +169,7 @@ pub async fn new(
         None => Keypair::generate_secp256k1(),
     };
     let peer_id = keypair.public().to_peer_id();
-    println!("Node peer id {:?} ", peer_id.to_base58());
+    debug!("Node peer id {:?} ", peer_id.to_base58());
 
     // Build swarm
     let transport = build_transport(&keypair)?;
@@ -1050,7 +1050,7 @@ pub struct DseMessageProtocol();
 
 impl request_response::ProtocolName for DseMessageProtocol {
     fn protocol_name(&self) -> &[u8] {
-        "/dse-message/1".as_bytes()
+        b"/dse-message/1"
     }
 }
 
@@ -1129,68 +1129,3 @@ impl RequestResponseCodec for DseMessageCodec {
         }
     }
 }
-
-// #[derive(Debug)]
-
-// impl NetworkBehaviourEventProcess<PingEvent> for Behaviour {
-//     fn inject_event(&mut self, event: PingEvent) {
-//         // match event {
-//         //     PingEvent {
-//         //         peer,
-//         //         result: Result::Ok(
-//         //             PingSuccess::Ping {
-//         //                 rtt
-//         //             }
-//         //         )
-//         //     } => {
-//         //         println!(
-//         //             "ping: rtt {:?} from {:?}", rtt, peer
-//         //         );
-//         //     },
-//         //     PingEvent {
-//         //         peer,
-//         //         result: Result::Ok(
-//         //             PingSuccess::Pong
-//         //         )
-//         //     } => {
-//         //         println!(
-//         //             "ping: pong from {:?}", peer
-//         //         );
-//         //     }
-//         //      PingEvent {
-//         //         peer,
-//         //         result: Result::Err(
-//         //             PingFailure::Timeout
-//         //         )
-//         //     } => {
-//         //         println!(
-//         //             "ping: timeout to peer {:?}", peer
-//         //         );
-//         //     }
-//         //     PingEvent {
-//         //         peer,
-//         //         result: Result::Err(
-//         //            PingFailure::Unsupported
-//         //         )
-//         //     } => {
-//         //         println!(
-//         //             "ping: peer {:?} does not support ping", peer
-//         //         );
-//         //     }
-//         //      PingEvent {
-//         //         peer,
-//         //         result: Result::Err(
-//         //            PingFailure::Other {
-//         //                error
-//         //            }
-//         //         )
-//         //     } => {
-//         //         println!(
-//         //             "ping: failure with peer {:?}: {:?}", peer, error
-//         //         );
-//         //     }
-
-//         // }
-
-//     }
-// }

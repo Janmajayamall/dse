@@ -12,10 +12,6 @@ pub struct Database {
 }
 
 impl Database {
-    // insert user queries
-    // insert received queries
-    // insert bid for a usr query
-
     pub fn insert_user_query(&mut self, query: &indexer::QueryReceived) {
         debug!("inserting user query {:?}", query);
 

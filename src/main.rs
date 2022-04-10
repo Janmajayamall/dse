@@ -16,6 +16,7 @@ mod database;
 mod ethnode;
 mod indexer;
 mod network;
+mod network_client;
 mod server;
 mod storage;
 mod subscription;

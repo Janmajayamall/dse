@@ -1,3 +1,4 @@
+use async_std::channel;
 use async_std::prelude::StreamExt;
 use async_trait::async_trait;
 use futures::{AsyncRead, AsyncWrite};
@@ -52,7 +53,7 @@ struct Behaviour {
 }
 
 impl Behaviour {
-    pub async fn new(keypair: &Keypair) -> Self {
+    pub async fn new(keypair: &Keypair) -> Result<Self, anyhow::Error> {
         let peer_id = keypair.public().to_peer_id();
         // setup kademlia
         let store = MemoryStore::new(peer_id);
@@ -75,17 +76,15 @@ impl Behaviour {
         let gossipsub_config = gossipsub::GossipsubConfigBuilder::default()
             .validation_mode(gossipsub::ValidationMode::Strict)
             .build()
-            .expect("Gossipsub config build failed!");
+            .map_err(anyhow::Error::msg)?;
         let mut gossipsub = Gossipsub::new(
             gossipsub::MessageAuthenticity::Signed(keypair.clone()),
             gossipsub_config,
         )
-        .expect("Gossipsub failed to initialise!");
+        .map_err(anyhow::Error::msg)?;
 
         // by default subcribe to search query topic
-        gossipsub
-            .subscribe(&GossipsubTopic::Query.ident_topic())
-            .expect("Gossipsub subscription to topic SearchQuery failed!");
+        gossipsub.subscribe(&GossipsubTopic::Query.ident_topic())?;
         debug!("gosipsub subscribed");
 
         // request response
@@ -95,13 +94,13 @@ impl Behaviour {
             Default::default(),
         );
 
-        Behaviour {
+        Ok(Behaviour {
             kademlia,
             mdns,
             ping,
             gossipsub,
             request_response,
-        }
+        })
     }
 }
 
@@ -155,37 +154,37 @@ impl libp2p::core::Executor for CustomExecutor {
 
 /// Creates a new network interface. Also
 /// sets up network event stream
-pub async fn new(
-    seed: Option<u8>,
-    command_receiver: mpsc::Receiver<Command>,
-) -> Result<(mpsc::Receiver<NetworkEvent>, NetworkInterface), Box<dyn Error>> {
-    let keypair = match seed {
-        Some(seed) => {
-            let mut bytes = [0u8; 32];
-            bytes[0] = seed;
-            let secret_key = secp256k1::SecretKey::from_bytes(bytes).expect("Invalid seed");
-            Keypair::Secp256k1(secret_key.into())
-        }
-        None => Keypair::generate_secp256k1(),
-    };
-    let peer_id = keypair.public().to_peer_id();
-    debug!("Node peer id {:?} ", peer_id.to_base58());
+// pub async fn new(
+//     seed: Option<u8>,
+//     command_receiver: mpsc::Receiver<Command>,
+// ) -> Result<(mpsc::Receiver<NetworkEvent>, Network), Box<dyn Error>> {
+//     // FIXME: keypair generation should happen in daemon
+//     let keypair = match seed {
+//         Some(seed) => {
+//             let mut bytes = [0u8; 32];
+//             bytes[0] = seed;
+//             let secret_key = secp256k1::SecretKey::from_bytes(bytes).expect("Invalid seed");
+//             Keypair::Secp256k1(secret_key.into())
+//         }
+//         None => Keypair::generate_secp256k1(),
+//     };
+//     let peer_id = keypair.public().to_peer_id();
+//     debug!("Node peer id {:?} ", peer_id.to_base58());
 
-    // Build swarm
-    let transport = build_transport(&keypair)?;
-    let behaviour = Behaviour::new(&keypair).await;
-    let swarm = SwarmBuilder::new(transport, behaviour, peer_id)
-        .executor(Box::new(CustomExecutor))
-        .build();
+//     // Build swarm
+//     let transport = build_transport(&keypair)?;
+//     let behaviour = Behaviour::new(&keypair).await;
+//     let swarm = SwarmBuilder::new(transport, behaviour, peer_id)
+//         .executor(Box::new(CustomExecutor))
+//         .build();
 
-    let (network_event_sender, network_event_receiver) = mpsc::channel::<NetworkEvent>(10);
+//     let (network_event_sender, network_event_receiver) = mpsc::channel::<NetworkEvent>(10);
 
-    // network interface
-    let network_interface =
-        NetworkInterface::new(keypair, swarm, command_receiver, network_event_sender);
+//     // network interface
+//     let network_interface = Network::new(keypair, swarm, command_receiver, network_event_sender);
 
-    Ok((network_event_receiver, network_interface))
-}
+//     Ok((network_event_receiver, network_interface))
+// }
 
 /// Uses TCP encrypted using noise DH and MPlex for multiplexing
 pub fn build_transport(identity_keypair: &Keypair) -> io::Result<Boxed<(PeerId, StreamMuxerBox)>> {
@@ -208,180 +207,33 @@ pub fn build_transport(identity_keypair: &Keypair) -> io::Result<Boxed<(PeerId, 
         .boxed())
 }
 
-// client & event loop for network
-#[derive(Clone)]
-pub struct Client {
-    pub command_sender: mpsc::Sender<Command>,
-}
-
-impl Client {
-    pub async fn add_kad_peer(
-        &mut self,
-        peer_id: PeerId,
-        peer_addr: Multiaddr,
-    ) -> Result<(), Box<dyn Error + Send>> {
-        let (sender, receiver) = oneshot::channel();
-        self.command_sender
-            .send(Command::AddKadPeer {
-                peer_id,
-                peer_addr,
-                sender,
-            })
-            .await
-            .expect("Command message dropped");
-        receiver.await.expect("Client response message dropped")
-    }
-
-    pub async fn add_request_response_peer(
-        &mut self,
-        peer_id: PeerId,
-        peer_addr: Multiaddr,
-    ) -> Result<(), Box<dyn Error + Send>> {
-        let (sender, receiver) = oneshot::channel();
-        self.command_sender
-            .send(Command::AddRequestResponsePeer {
-                peer_id,
-                peer_addr,
-                sender,
-            })
-            .await
-            .expect("Command message dropped");
-        receiver.await.expect("Client response message dropped")
-    }
-
-    pub async fn start_listening(&mut self, addr: Multiaddr) -> Result<(), Box<dyn Error + Send>> {
-        let (sender, receiver) = oneshot::channel();
-        self.command_sender
-            .send(Command::StartListening { addr, sender })
-            .await
-            .expect("Command message dropped");
-        receiver.await.expect("Client response message dropped")
-    }
-
-    pub async fn dht_put(
-        &mut self,
-        record: Record,
-        quorum: Quorum,
-    ) -> Result<PutRecordOk, Box<dyn Error + Send>> {
-        let (sender, receiver) = oneshot::channel();
-        self.command_sender
-            .send(Command::DhtPut {
-                record,
-                quorum,
-                sender,
-            })
-            .await
-            .expect("Command message dropped");
-        receiver.await.expect("Client response message dropped")
-    }
-
-    pub async fn dht_get(
-        &mut self,
-        key: Key,
-        quorum: Quorum,
-    ) -> Result<GetRecordOk, GetRecordError> {
-        let (sender, receiver) = oneshot::channel();
-        self.command_sender
-            .send(Command::DhtGet {
-                key,
-                quorum,
-                sender,
-            })
-            .await
-            .expect("Command message dropped");
-        receiver.await.expect("Client response message dropped")
-    }
-
-    pub async fn kad_bootstrap(&mut self) -> Result<(), Box<dyn Error + Send>> {
-        let (sender, receiver) = oneshot::channel();
-        self.command_sender
-            .send(Command::Bootstrap { sender })
-            .await
-            .expect("Command message dropped");
-        receiver.await.expect("Client response message dropped")
-    }
-
-    pub async fn publish_message(
-        &mut self,
-        message: GossipsubMessage,
-    ) -> Result<gossipsub::MessageId, Box<dyn Error + Send>> {
-        let (sender, receiver) = oneshot::channel();
-        self.command_sender
-            .send(Command::PublishMessage { message, sender })
-            .await
-            .expect("Command message dropped");
-        receiver.await.expect("Client response message dropped")
-    }
-
-    pub async fn send_dse_message_request(
-        &mut self,
-        peer_id: PeerId,
-        message: DseMessageRequest,
-    ) -> Result<DseMessageResponse, Box<dyn Error + Send>> {
-        let (sender, receiver) = oneshot::channel();
-        self.command_sender
-            .send(Command::SendDseMessageRequest {
-                peer_id,
-                message,
-                sender,
-            })
-            .await
-            .expect("Command message dropped");
-        receiver.await.expect("Client response message dropped")
-    }
-
-    pub async fn send_dse_message_response(
-        &mut self,
-        request_id: request_response::RequestId,
-        response: DseMessageResponse,
-    ) -> Result<(), Box<dyn Error + Send>> {
-        let (sender, receiver) = oneshot::channel();
-        self.command_sender
-            .send(Command::SendDseMessageResponse {
-                request_id,
-                response,
-                sender,
-            })
-            .await
-            .expect("Command message dropped");
-        receiver.await.expect("Client response message dropped")
-    }
-
-    pub async fn network_details(&mut self) -> Result<(PeerId, Multiaddr), Box<anyhow::Error>> {
-        let (sender, receiver) = oneshot::channel();
-        self.command_sender
-            .send(Command::NetworkDetails { sender })
-            .await
-            .expect("Command message dropped");
-        receiver.await.expect("Client response message dropped")
-    }
-}
-
-pub struct NetworkInterface {
+pub struct Network {
     /// keypair of the node
     pub keypair: Keypair,
     /// Multiaddr of the node
     pub node_address: Option<Multiaddr>,
+
     swarm: Swarm<Behaviour>,
+
+    command_sender: mpsc::Sender<Command>,
     command_receiver: mpsc::Receiver<Command>,
-    network_event_sender: mpsc::Sender<NetworkEvent>,
-    pending_dht_put_requests:
-        HashMap<QueryId, oneshot::Sender<Result<PutRecordOk, Box<dyn Error + Send>>>>,
-    pending_dht_get_requests:
-        HashMap<QueryId, oneshot::Sender<Result<GetRecordOk, GetRecordError>>>,
-    pending_add_peers: HashMap<PeerId, oneshot::Sender<Result<(), Box<dyn Error + Send>>>>,
-    pending_bootstrap_requests:
-        HashMap<QueryId, oneshot::Sender<Result<(), Box<dyn Error + Send>>>>,
+    network_event_sender: channel::Sender<NetworkEvent>,
+    network_event_receiver: channel::Receiver<NetworkEvent>,
+
+    pending_dht_put_requests: HashMap<QueryId, oneshot::Sender<Result<PutRecordOk, anyhow::Error>>>,
+    pending_dht_get_requests: HashMap<QueryId, oneshot::Sender<Result<GetRecordOk, anyhow::Error>>>,
+    pending_add_peers: HashMap<PeerId, oneshot::Sender<Result<(), anyhow::Error>>>,
+    pending_bootstrap_requests: HashMap<QueryId, oneshot::Sender<Result<(), anyhow::Error>>>,
     // Pending result of outbound request. It returns DseMessageResponse
     // which means the fn does not finishes until peer to which outcound request
     // is sent, responds using channel or channel drops.
     pending_dse_outbound_message_requests: HashMap<
         request_response::RequestId,
-        oneshot::Sender<Result<DseMessageResponse, Box<dyn Error + Send>>>,
+        oneshot::Sender<Result<DseMessageResponse, anyhow::Error>>,
     >,
     // Pending result of response sent to an inbound request
     pending_dse_inbound_message_response:
-        HashMap<request_response::RequestId, oneshot::Sender<Result<(), Box<dyn Error + Send>>>>,
+        HashMap<request_response::RequestId, oneshot::Sender<Result<(), anyhow::Error>>>,
     // Stores response channels of an inbound request
     response_channels_for_inbound_requests:
         HashMap<request_response::RequestId, request_response::ResponseChannel<DseMessageResponse>>,
@@ -389,19 +241,28 @@ pub struct NetworkInterface {
     known_peers: HashMap<PeerId, Addresses>,
 }
 
-impl NetworkInterface {
-    fn new(
-        keypair: Keypair,
-        swarm: Swarm<Behaviour>,
-        command_receiver: mpsc::Receiver<Command>,
-        network_event_sender: mpsc::Sender<NetworkEvent>,
-    ) -> Self {
-        Self {
+impl Network {
+    pub async fn new(keypair: Keypair) -> Result<Self, anyhow::Error> {
+        // Build swarm
+        let transport = build_transport(&keypair)?;
+        let behaviour = Behaviour::new(&keypair).await?;
+        let swarm = SwarmBuilder::new(transport, behaviour, keypair.public().to_peer_id())
+            .executor(Box::new(CustomExecutor))
+            .build();
+
+        let (command_sender, command_receiver) = mpsc::channel(10);
+        let (network_event_sender, network_event_receiver) = channel::unbounded();
+
+        Ok(Self {
             keypair,
             node_address: None,
             swarm,
+
+            command_sender,
             command_receiver,
             network_event_sender,
+            network_event_receiver,
+
             pending_dht_put_requests: Default::default(),
             pending_dht_get_requests: Default::default(),
             pending_add_peers: Default::default(),
@@ -410,7 +271,7 @@ impl NetworkInterface {
             pending_dse_inbound_message_response: Default::default(),
             response_channels_for_inbound_requests: Default::default(),
             known_peers: Default::default(),
-        }
+        })
     }
 
     pub async fn run(mut self) {
@@ -427,7 +288,7 @@ impl NetworkInterface {
                 swarm_event = self.swarm.next() => {
                     match swarm_event {
                         Some(event) => {
-                            self.swarm_event_handler(event).await
+                            self.swarm_event_handler(event).await;
                         }
                         None => {return}
                     }
@@ -436,18 +297,24 @@ impl NetworkInterface {
         }
     }
 
+    fn network_event_receiver(&self) -> channel::Receiver<NetworkEvent> {
+        self.network_event_receiver.clone()
+    }
+
+    fn network_command_sender(&self) -> mpsc::Sender<Command> {
+        self.command_sender.clone()
+    }
+
     async fn command_handler(&mut self, command: Command) {
         match command {
-            Command::StartListening { addr, sender } => {
-                match self.swarm.listen_on(addr) {
-                    Ok(_) => {
-                        let _ = sender.send(Ok(()));
-                    }
-                    Err(e) => {
-                        let _ = sender.send(Err(Box::new(e)));
-                    }
-                };
-            }
+            Command::StartListening { addr, sender } => match self.swarm.listen_on(addr) {
+                Ok(_) => {
+                    sender.send(Ok(()));
+                }
+                Err(e) => {
+                    sender.send(Err(e.into()));
+                }
+            },
             Command::AddKadPeer {
                 peer_id,
                 peer_addr,
@@ -457,9 +324,9 @@ impl NetworkInterface {
                     .behaviour_mut()
                     .kademlia
                     .add_address(&peer_id, peer_addr.clone());
-                let _ = sender.send(Ok(()));
+                let _ = sender.send(());
                 debug!(
-                    "kad: peer added with peerId {:?} multiAddr {:?}",
+                    "(kad) peer added with peerId {:?} multiAddr {:?}",
                     peer_id, peer_addr
                 );
             }
@@ -472,7 +339,7 @@ impl NetworkInterface {
                     .behaviour_mut()
                     .request_response
                     .add_address(&peer_id, peer_addr.clone());
-                let _ = sender.send(Ok(()));
+                let _ = sender.send(());
                 debug!(
                     "(request_response) peer added with peerId {:?} multiAddr {:?}",
                     peer_id, peer_addr
@@ -493,7 +360,7 @@ impl NetworkInterface {
                         self.pending_dht_put_requests.insert(query_id, sender);
                     }
                     Err(e) => {
-                        let _ = sender.send(Err(Box::new(e)));
+                        sender.send(Err(e.into()));
                     }
                 }
             }
@@ -507,14 +374,15 @@ impl NetworkInterface {
             }
             Command::Bootstrap { sender } => {
                 match self.swarm.behaviour_mut().kademlia.bootstrap() {
-                    Ok(query_id) => {
-                        self.pending_bootstrap_requests.insert(query_id, sender);
+                    Ok(q) => {
+                        self.pending_bootstrap_requests.insert(q, sender);
                     }
                     Err(e) => {
-                        let _ = sender.send(Err(Box::new(e)));
+                        sender.send(Err(e.into()));
                     }
                 }
             }
+
             Command::PublishMessage { message, sender } => {
                 match self
                     .swarm
@@ -522,13 +390,13 @@ impl NetworkInterface {
                     .gossipsub
                     .publish(message.topic(), message.clone())
                 {
-                    Ok(message_id) => {
-                        let _ = sender.send(Ok(message_id));
+                    Ok(m_id) => {
                         debug!("(gossipsub) published a message {:?}", message);
+                        sender.send(Ok(m_id));
                     }
                     Err(e) => {
                         error!("(gossipsub) failed to publish message {:?}", e);
-                        let _ = sender.send(Err(Box::new(e)));
+                        sender.send(Err(e.into()));
                     }
                 }
             }
@@ -542,33 +410,18 @@ impl NetworkInterface {
                     .remove(&request_id)
                 {
                     Some(channel) => {
-                        match self
-                            .swarm
+                        self.swarm
                             .behaviour_mut()
                             .request_response
-                            .send_response(channel, response)
-                        {
-                            Ok(_) => {
-                                self.pending_dse_inbound_message_response
-                                    .insert(request_id, sender);
-                            }
-                            Err(_) => {
-                                // send_response returns Error, when
-                                // ResponseChannel is already closed
-                                // due to Timeout or Connection Err.
-                                // Thus, we send InboundFailure::Timeout
-                                // here as the error.
-                                let _ = sender
-                                    .send(Err(Box::new(request_response::InboundFailure::Timeout)));
-                            }
-                        }
+                            .send_response(channel, response);
+                        self.pending_dse_inbound_message_response
+                            .insert(request_id, sender);
                     }
                     None => {
-                        // FIX: InboundFailure isn't necessary here.
-                        // Replace it with something like
-                        // "Channel not found".
-                        let _ =
-                            sender.send(Err(Box::new(request_response::InboundFailure::Timeout)));
+                        sender.send(Err(anyhow::anyhow!(
+                            "Response channel is missing for inboud request with requst id: {}",
+                            request_id
+                        )));
                     }
                 }
             }
@@ -586,13 +439,13 @@ impl NetworkInterface {
                     .insert(request_id, sender);
             }
             Command::NetworkDetails { sender } => match self.node_address.clone() {
-                Some(address) => {
-                    sender.send(Ok((self.keypair.public().to_peer_id(), address)));
+                Some(v) => {
+                    sender.send(Ok((self.keypair.public().to_peer_id(), v)));
                 }
                 None => {
-                    sender.send(Err(Box::new(anyhow::anyhow!(
+                    sender.send(Err(anyhow::anyhow!(
                         "(network) node does not have local address assigned"
-                    ))));
+                    )));
                 }
             },
         }
@@ -613,41 +466,41 @@ impl NetworkInterface {
     ) {
         match event {
             SwarmEvent::Behaviour(BehaviourEvent::Mdns(event)) => {
-                self.network_event_sender
-                    .send(NetworkEvent::Mdns(event))
-                    .await
-                    .expect("Network event message dropped");
+                emit_event(&self.network_event_sender, NetworkEvent::Mdns(event)).await;
             }
             SwarmEvent::Behaviour(BehaviourEvent::Kademlia(
                 KademliaEvent::OutboundQueryCompleted { id, result, .. },
             )) => match result {
                 QueryResult::PutRecord(Ok(record)) => {
-                    let _ = self
-                        .pending_dht_put_requests
-                        .remove(&id)
-                        .expect("Put Request should be pending!")
-                        .send(Ok(record));
+                    if let Some(sender) = self.pending_dht_put_requests.remove(&id) {
+                        sender.send(Ok(record));
+                    } else {
+                        emit_response_channel_missing(&id);
+                    }
                 }
                 QueryResult::PutRecord(Err(err)) => {
-                    let _ = self
-                        .pending_dht_put_requests
-                        .remove(&id)
-                        .expect("Put Request should be pending!")
-                        .send(Err(Box::new(err)));
+                    if let Some(sender) = self.pending_dht_put_requests.remove(&id) {
+                        sender.send(Err(err.into()));
+                    } else {
+                        emit_response_channel_missing(&id);
+                    }
                 }
                 QueryResult::GetRecord(Ok(record)) => {
-                    let _ = self
-                        .pending_dht_get_requests
-                        .remove(&id)
-                        .expect("Get Request should be pending!")
-                        .send(Ok(record));
+                    if let Some(sender) = self.pending_dht_get_requests.remove(&id) {
+                        sender.send(Ok(record));
+                    } else {
+                        emit_response_channel_missing(&id);
+                    }
                 }
                 QueryResult::GetRecord(Err(err)) => {
-                    let _ = self
-                        .pending_dht_get_requests
-                        .remove(&id)
-                        .expect("Get Request should be pending!")
-                        .send(Err(err));
+                    if let Some(sender) = self.pending_dht_get_requests.remove(&id) {
+                        // FIXME: GetRecordError doen not implement
+                        // Error trait. Track issue here - https://github.com/libp2p/rust-libp2p/issues/2612.
+                        // sender.send(Err(err.into()));
+                        sender.send(Err(anyhow::anyhow!("Get record error")));
+                    } else {
+                        emit_response_channel_missing(&id);
+                    }
                 }
                 QueryResult::Bootstrap(Ok(record)) => {
                     debug!(
@@ -655,11 +508,11 @@ impl NetworkInterface {
                         record.peer, record.num_remaining
                     );
                     if record.num_remaining == 0 {
-                        let _ = self
-                            .pending_bootstrap_requests
-                            .remove(&id)
-                            .expect("Bootstrap request should be pending!")
-                            .send(Ok(()));
+                        if let Some(sender) = self.pending_bootstrap_requests.remove(&id) {
+                            sender.send(Ok(()));
+                        } else {
+                            emit_response_channel_missing(&id);
+                        }
                     }
                 }
                 QueryResult::Bootstrap(Err(err)) => match err {
@@ -671,12 +524,13 @@ impl NetworkInterface {
                             "kad: Bootstrap with peer id {:?} failed; num remaining {:?} ",
                             peer, num_remaining
                         );
+
                         if num_remaining.is_none() || num_remaining.unwrap() == 0 {
-                            let _ = self
-                                .pending_bootstrap_requests
-                                .remove(&id)
-                                .expect("Bootstrap request should be pending!")
-                                .send(Err(Box::new(err)));
+                            if let Some(sender) = self.pending_bootstrap_requests.remove(&id) {
+                                sender.send(Err(err.into()));
+                            } else {
+                                emit_response_channel_missing(&id);
+                            }
                         }
                     }
                 },
@@ -688,7 +542,7 @@ impl NetworkInterface {
                 ..
             })) => {
                 debug!(
-                    "kad: routing updated with peerId {:?} address {:?} ",
+                    "(kad) routing updated with peerId {:?} address {:?} ",
                     peer, addresses
                 );
 
@@ -699,63 +553,75 @@ impl NetworkInterface {
                 message,
                 ..
             })) => {
-                debug!("gossipsub: Received message {:?} ", message.clone());
+                debug!("(gossipsub) Received message {:?} ", message.clone());
                 match GossipsubMessage::try_from(message) {
                     Ok(m) => {
-                        self.network_event_sender
-                            .send(NetworkEvent::GossipsubMessageRecv(m))
-                            .await
-                            .expect("Network event message dropped");
+                        emit_event(
+                            &self.network_event_sender,
+                            NetworkEvent::GossipsubMessageRecv(m),
+                        )
+                        .await;
                     }
                     Err(e) => {
-                        self.network_event_sender
-                            .send(NetworkEvent::GossipsubMessageRecvErr(e))
-                            .await
-                            .expect("Network event message dropped");
+                        error!("(gossipsub) Received message errored with {}", e);
                     }
                 }
             }
             SwarmEvent::Behaviour(BehaviourEvent::RequestResponse(
                 RequestResponseEvent::Message { peer, message },
-            )) => match message {
-                RequestResponseMessage::Request {
-                    request_id,
-                    request,
-                    channel,
-                } => {
-                    // debug!("request_response: Received request {:?} ", request.clone());
-                    self.response_channels_for_inbound_requests
-                        .insert(request_id, channel);
-                    self.network_event_sender
-                        .send(NetworkEvent::DseMessageRequestRecv {
-                            peer_id: peer,
-                            request_id,
-                            request,
-                        })
-                        .await
-                        .expect("Network evvent message dropped");
+            )) => {
+                match message {
+                    RequestResponseMessage::Request {
+                        request_id,
+                        request,
+                        channel,
+                    } => {
+                        // debug!("request_response: Received request {:?} ", request.clone());
+                        self.response_channels_for_inbound_requests
+                            .insert(request_id, channel);
+                        emit_event(
+                            &self.network_event_sender,
+                            NetworkEvent::DseMessageRequestRecv {
+                                peer_id: peer,
+                                request_id,
+                                request,
+                            },
+                        )
+                        .await;
+                    }
+                    RequestResponseMessage::Response {
+                        request_id,
+                        response,
+                    } => {
+                        // debug!(
+                        //     "request_response: Received response {:?} ",
+                        //     response.clone()
+                        // );
+                        if let Some(sender) = self
+                            .pending_dse_outbound_message_requests
+                            .remove(&request_id)
+                        {
+                            sender.send(Ok(response));
+                        } else {
+                            error!("(Outbound message request) response channel missing for request id {}", request_id);
+                        }
+                    }
                 }
-                RequestResponseMessage::Response {
-                    request_id,
-                    response,
-                } => {
-                    // debug!(
-                    //     "request_response: Received response {:?} ",
-                    //     response.clone()
-                    // );
-                    self.pending_dse_outbound_message_requests
-                        .remove(&request_id)
-                        .expect("Outbound Request should be pending!")
-                        .send(Ok(response));
-                }
-            },
+            }
             SwarmEvent::Behaviour(BehaviourEvent::RequestResponse(
                 RequestResponseEvent::ResponseSent { peer, request_id },
             )) => {
-                self.pending_dse_inbound_message_response
+                if let Some(sender) = self
+                    .pending_dse_inbound_message_response
                     .remove(&request_id)
-                    .expect("Outbound Request should be pending!")
-                    .send(Ok(()));
+                {
+                    sender.send(Ok(()));
+                } else {
+                    error!(
+                        "(Inbound message response) response channel missing for request id {}",
+                        request_id
+                    );
+                }
             }
             SwarmEvent::Behaviour(BehaviourEvent::RequestResponse(
                 RequestResponseEvent::OutboundFailure {
@@ -764,10 +630,17 @@ impl NetworkInterface {
                     error,
                 },
             )) => {
-                self.pending_dse_outbound_message_requests
+                if let Some(sender) = self
+                    .pending_dse_outbound_message_requests
                     .remove(&request_id)
-                    .expect("Outbound Request should be pending!")
-                    .send(Err(Box::new(error)));
+                {
+                    sender.send(Err(error.into()));
+                } else {
+                    error!(
+                        "(Outbound message request) response channel missing for request id {}",
+                        request_id
+                    );
+                }
             }
             SwarmEvent::Behaviour(BehaviourEvent::RequestResponse(
                 RequestResponseEvent::InboundFailure {
@@ -776,17 +649,16 @@ impl NetworkInterface {
                     error,
                 },
             )) => {
-                // RequestResponseEvent::InboundFailure is thrown anytime
-                // (like channel timeout of channel dropped) irrespective
-                // of whether there was a response initiated by client commands.
-                match self
+                if let Some(sender) = self
                     .pending_dse_inbound_message_response
                     .remove(&request_id)
                 {
-                    Some(sender) => {
-                        sender.send(Err(Box::new(error)));
-                    }
-                    None => {}
+                    sender.send(Err(error.into()));
+                } else {
+                    error!(
+                        "(Inbound message response) response channel missing for request id {}",
+                        request_id
+                    );
                 }
             }
             SwarmEvent::IncomingConnection {
@@ -854,51 +726,64 @@ impl NetworkInterface {
     }
 }
 
+async fn emit_event(sender: &channel::Sender<NetworkEvent>, event: NetworkEvent) {
+    if sender.send(event).await.is_err() {
+        error!("Network evnent failed: Network event receiver dropped");
+    }
+}
+
+fn emit_response_channel_missing(query_id: &QueryId) {
+    error!(
+        "Response channel for pending req QueryId {:?} missing",
+        query_id
+    );
+}
+
 #[derive(Debug)]
 pub enum Command {
     StartListening {
         addr: Multiaddr,
-        sender: oneshot::Sender<Result<(), Box<dyn Error + Send>>>,
+        sender: oneshot::Sender<Result<(), anyhow::Error>>,
     },
     AddKadPeer {
         peer_id: PeerId,
         peer_addr: Multiaddr,
-        sender: oneshot::Sender<Result<(), Box<dyn Error + Send>>>,
+        sender: oneshot::Sender<()>,
     },
     AddRequestResponsePeer {
         peer_id: PeerId,
         peer_addr: Multiaddr,
-        sender: oneshot::Sender<Result<(), Box<dyn Error + Send>>>,
+        sender: oneshot::Sender<()>,
     },
     DhtPut {
         record: Record,
         quorum: Quorum,
-        sender: oneshot::Sender<Result<PutRecordOk, Box<dyn Error + Send>>>,
+        sender: oneshot::Sender<Result<PutRecordOk, anyhow::Error>>,
     },
     DhtGet {
         key: Key,
         quorum: Quorum,
-        sender: oneshot::Sender<Result<GetRecordOk, GetRecordError>>,
+        sender: oneshot::Sender<Result<GetRecordOk, anyhow::Error>>,
     },
     Bootstrap {
-        sender: oneshot::Sender<Result<(), Box<dyn Error + Send>>>,
+        sender: oneshot::Sender<Result<(), anyhow::Error>>,
     },
     PublishMessage {
         message: GossipsubMessage,
-        sender: oneshot::Sender<Result<gossipsub::MessageId, Box<dyn Error + Send>>>,
+        sender: oneshot::Sender<Result<gossipsub::MessageId, anyhow::Error>>,
     },
     SendDseMessageResponse {
         request_id: request_response::RequestId,
         response: DseMessageResponse,
-        sender: oneshot::Sender<Result<(), Box<dyn Error + Send>>>,
+        sender: oneshot::Sender<Result<(), anyhow::Error>>,
     },
     SendDseMessageRequest {
         peer_id: PeerId,
         message: DseMessageRequest,
-        sender: oneshot::Sender<Result<DseMessageResponse, Box<dyn Error + Send>>>,
+        sender: oneshot::Sender<Result<DseMessageResponse, anyhow::Error>>,
     },
     NetworkDetails {
-        sender: oneshot::Sender<Result<(PeerId, Multiaddr), Box<anyhow::Error>>>,
+        sender: oneshot::Sender<Result<(PeerId, Multiaddr), anyhow::Error>>,
     },
 }
 

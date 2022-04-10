@@ -1,15 +1,19 @@
-use libp2p::{request_response, Multiaddr, PeerId};
+use async_std::channel;
+use libp2p::{request_response, Keypair, Multiaddr, PeerId};
 use log::{debug, error, info};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 use tokio::select;
 use tokio::sync::{mpsc, oneshot};
 
 use super::commitment;
 use super::database;
 use super::network;
+use super::network_client;
 use super::server;
+use super::storage;
 
 pub type QueryId = u32;
 
@@ -201,53 +205,133 @@ impl Client {
 /// That means sends and receives querues & bids.
 pub struct Indexer {
     /// Receives indexer commands
-    command_receiver: mpsc::Receiver<Command>,
+    // command_receiver: mpsc::Receiver<Command>,
     /// FIX - I think this is useless
-    event_sender: mpsc::Sender<IndexerEvent>,
+    // event_sender: mpsc::Sender<IndexerEvent>,
+    /// node's keypair
+    keypair: Keypair,
     /// Sends events to server clients over websocket
     server_client_senders: HashMap<usize, mpsc::UnboundedSender<server::SendWssMessage>>,
     /// network client
-    network_client: network::Client,
+    network_client: network_client::Client,
+    network_event_receiver: channel::Receiver<network::NetworkEvent>,
     /// commitment client
-    commitment_client: commitment::Client,
+    // commitment_client: commitment::Client,
     /// sent query counter
     query_counter: AtomicUsize,
     /// global database
-    database: database::Database,
+    storage: Arc<storage::Storage>,
 }
 
 impl Indexer {
     pub fn new(
-        command_receiver: mpsc::Receiver<Command>,
-        event_sender: mpsc::Sender<IndexerEvent>,
-
-        network_client: network::Client,
-        commitment_client: commitment::Client,
-        database: database::Database,
+        keypair: Keypair,
+        network_client: network_client::Client,
+        network_event_receiver: channel::Receiver<network::NetworkEvent>,
+        storage: Arc<storage::Storage>,
     ) -> Self {
         Self {
-            command_receiver,
-            event_sender,
-
+            keypair,
             server_client_senders: Default::default(),
+
             network_client,
-            commitment_client,
+            network_event_receiver,
+
             query_counter: AtomicUsize::new(1),
-            database,
+            storage,
         }
     }
 
     pub async fn run(mut self) {
         loop {
             select! {
-                command = self.command_receiver.recv() => {
-                    match command {
-                        Some(c) => self.command_handler(c).await,
-                        None => {}
-                    }
-                },
+                // command = self.command_receiver.recv() => {
+                //     match command {
+                //         Some(c) => self.command_handler(c).await,
+                //         None => {}
+                //     }
+                // },
+                event = self.network_event_receiver.recv() => {
 
+                }
             }
+        }
+    }
+
+    pub async fn handle_network_event(&self, event: network::NetworkEvent) {
+        use network::{DseMessageRequest, GossipsubMessage, NetworkEvent};
+        match event {
+            NetworkEvent::GossipsubMessageRecv(GossipsubMessage::NewQuery(query)) => {
+                self.storage.add_query_received(query);
+                // TODO inform client over WSS
+            }
+            NetworkEvent::DseMessageRequestRecv {
+                peer_id,
+                request_id,
+                request,
+            } => {
+                match request {
+                    DseMessageRequest::PlaceBid { query_id, bid } => {
+                        // Received PlaceBid request from Requester for placing a bid
+                        // for a query. Therefore, first check whether node (i.e. Requester)
+                        // sent a query with given query id.
+                        if let Ok(query) = self.storage.find_query_sent_by_query_id(&query_id) {
+                            self.storage.add_bid_received_for_query(&query_id, bid);
+
+                            // TODO inform the clients over WSS
+                        } else {
+                            // TODO send bad response
+                        }
+                    }
+                    DseMessageRequest::AcceptBid {
+                        query_id,
+                        requester_wallet_address,
+                    } => {
+                        // Received AcceptBid from Requester for bid placed by Node
+                        // (i.e. Provider) on their query with given query id.
+                        // Therefore, first check that bid was placed & query was received by
+                        // the Node.
+                        if let Ok((bid, query)) = self
+                            .storage
+                            .find_bid_sent_by_query_id(&query_id)
+                            .and_then(|bid| {
+                                self.storage
+                                    .find_query_received_by_query_id(&query_id)
+                                    .and_then(|query| Ok((bid, query)))
+                            })
+                        {
+                            // is_requester = false, since node is provider
+                            self.storage.add_new_trade(query, bid, false);
+
+                            // TODO validate and store requester's wallet address.
+                            // I think we should store wallet addresses of provider & requester
+                            // in the trade struct.
+
+                            // TODO inform clients over WSS
+                        } else {
+                            // TODO send bad response
+                        }
+                    }
+                    DseMessageRequest::StartCommit {
+                        query_id,
+                        provider_wallet_addr,
+                    } => {
+                        // Received StartCommit from Provider for AcceptedBid on a published
+                        // Query by the Node (i.e. Requester). Thus, Trade object should exist
+                        // for the given query id with provider id as peer id.
+                        if let Ok(trade) =
+                            self.storage
+                                .find_active_trade(&query_id, &peer_id, &self.keypair)
+                        {
+                            // TODO prepare for t2 commits
+                        } else {
+                            // TODO send bad response
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            _ => {}
         }
     }
 

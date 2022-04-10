@@ -41,6 +41,7 @@ use tokio::{io, select};
 
 use super::commitment;
 use super::indexer;
+use super::storage;
 
 #[derive(NetworkBehaviour)]
 #[behaviour(out_event = "BehaviourEvent")]
@@ -805,7 +806,7 @@ pub enum NetworkEvent {
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub enum GossipsubMessage {
-    NewQuery(indexer::QueryReceived),
+    NewQuery(storage::Query),
 }
 
 impl TryFrom<gossipsub::GossipsubMessage> for GossipsubMessage {
@@ -816,7 +817,7 @@ impl TryFrom<gossipsub::GossipsubMessage> for GossipsubMessage {
                 Ok(v) => Ok(v),
                 Err(e) => Err(Box::new(e)),
             },
-            None => Err("gossipsub: Gossipsub message does not contain source peer id".into()),
+            None => Err("(gossipsub) Gossipsub message does not contain source peer id".into()),
         }
     }
 }
@@ -916,14 +917,67 @@ pub enum IndexerResponse {
 // All stuff related to request response
 #[derive(Deserialize, Serialize, Debug, Clone, PartialEq)]
 pub enum DseMessageRequest {
-    /// Requests related to indexer
-    Indexer(IndexerRequest),
-    /// Requests related to commit fund
-    Commit(CommitRequest),
+    /// Provider places bid for a query
+    /// to the Requester
+    PlaceBid {
+        query_id: indexer::QueryId,
+        bid: storage::Bid
+        ,
+    },
+    /// Requester sends bid acceptance to
+    /// Provider along with wallet address.
+    AcceptBid {
+        query_id: indexer::QueryId,
+        requester_wallet_address: ethers::types::Address,
+    },
+    /// Provider sends start commit procedure
+    /// to Requester along with wallet address.
+    StartCommit {
+        query_id: indexer::QueryId,
+        provider_wallet_addr: ethers::types::Address,
+    },
+    /// Requester sends T1 commitment to Provider
+    ///
+    /// This request acknowledges that requester's
+    /// wallet address is suitable for exchange
+    T1RequesterCommit {
+        query_id: indexer::QueryId,
+        commit: String,
+    },
+    /// Provider sends T1 commitment to Requester
+    ///
+    /// This request acknowledges that Requester's T1
+    /// commitment is valid
+    T1ProviderCommit {
+        query_id: indexer::QueryId,
+        commit: String,
+    },
+    /// Requester sends T2 commitment to Provider
+    ///
+    /// This request acknowledges that Provider's T1
+    /// commitment is valid
+    T2RequesterCommit {
+        query_id: indexer::QueryId,
+        commit: String,
+    },
+    /// Provider sends acknowledgement to Requester
+    /// that T2 commit is valid
+    T2CommitValid { query_id: indexer::QueryId },
+    /// Provider sends response (i.e. provides service)
+    /// to the reqester
+    Service { query_id: indexer::QueryId },
+    /// Requester sends invaldating signature for commits
+    /// to the Provider
+    InvalidatingSignature {
+        query_id: indexer::QueryId,
+        invalidating_signature: ethers::types::Signature,
+    },
 }
 
 #[derive(Deserialize, Serialize, Debug, Clone, PartialEq)]
 pub enum DseMessageResponse {
+    /// Acknowledges the request
+    Ack,
     /// Responses related to indexer
     Indexer(IndexerResponse),
     /// Responss related to commit fund

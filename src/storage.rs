@@ -1,3 +1,7 @@
+use ethers::{
+    types::{Address, Signature, H256, U256},
+    utils::keccak256,
+};
 use libp2p::{Multiaddr, PeerId};
 use serde::{Deserialize, Serialize};
 use sled::{Config, Db};
@@ -8,44 +12,63 @@ type QueryId = u32;
 
 /// Stores qeury string and
 /// other realted info to the query
-#[derive(Deserialize, Serialize, Debug)]
+#[derive(Deserialize, Serialize, Debug, Clone)]
 pub struct QueryData {
     query_string: String,
 }
 
 #[derive(Deserialize, Serialize, Debug)]
 pub struct Query {
-    id: QueryId,
-    data: QueryData,
-    requester_addr: Multiaddr,
-    requester_id: PeerId,
+    pub id: QueryId,
+    pub data: QueryData,
+    pub requester_addr: Multiaddr,
+    pub requester_id: PeerId,
 }
 
-#[derive(Deserialize, Serialize, Debug)]
+#[derive(Deserialize, Serialize, Debug, Clone, PartialEq)]
 pub struct Bid {
     query_id: QueryId,
-    bidder_addr: Multiaddr,
-    bidder_id: PeerId,
-    charge: ethers::types::U256,
+    provider_addr: Multiaddr,
+    provider_id: PeerId,
+    charge: U256,
 }
 
-#[derive(Deserialize, Serialize, Debug)]
+#[derive(Deserialize, Serialize, Debug, PartialEq)]
+// P = BidAccepted
+// R = Waiting Start Commit
+// P = Waiting T1 Commit
+// R = Waitinf P's T1 Commit
+// P = Waiting T2 commit
+// R = Waiting Service
+// P = Waiting Invalidating Singauture
 pub enum TradeStatus {
-    /// Bid has been sent/received
-    BidPlaced,
-    /// Requester has accepted the bid
-    BidAccepted,
-    /// Requester has committed T1 commits
-    ReqT1Committed,
-    /// Bidder has committed T1 commits
-    BidT1Committed,
-    /// Requester has committed T2 commits
-    ReqT2Committed,
-    /// Bidder has provided the service
-    ServiceProvided,
-    /// Requester has shared the invalidating signature with
-    /// bidder
-    CommitsInvalidated,
+    /// Provider should send StartCommit
+    PSendStartCommit,
+    /// Requester is waiting for Start Commit
+    /// from provider
+    WaitingStartCommit,
+    /// Provider is waiting for Requester's T1
+    /// Commit
+    WaitingRT1Commit,
+    /// Requester should send T1 commit
+    RSendT1Commit,
+    /// Requester is waiting for Provider's T1
+    /// Commit
+    WaitingPT1Commit,
+    /// Provider should send T1 commit
+    PSendT1Commit,
+    /// Provider is waiting for Requester's T2
+    /// Commit
+    WaitingRT2Commit,
+    /// Requester should send T2 commit
+    RSendT2Commit,
+    /// Requester is waiting for Provider to
+    /// fulfill the service
+    WaitingForService,
+    /// Provider should provide service
+    PFulfillService,
+    /// Provider is waitig for Invalidting Signatures
+    WaitingInvalidatingSignatures,
 }
 
 /// Stores trade infor between
@@ -53,16 +76,124 @@ pub enum TradeStatus {
 #[derive(Deserialize, Serialize, Debug)]
 pub struct Trade {
     /// Trade query
-    query: Query,
+    pub query: Query,
     /// Trade bid (accepted by requester)
-    bid: Bid,
+    pub bid: Bid,
     /// Status of the trade
-    status: TradeStatus,
+    pub status: TradeStatus,
     /// Query id
-    query_id: QueryId,
+    pub query_id: QueryId,
     /// Flag whether node is requester
     /// OR provider
-    is_requester: bool,
+    pub is_requester: bool,
+    /// Wallet address of requester
+    pub requester_wallet_address: Address,
+    /// Wallet address of provider
+    pub provider_wallet_address: Address,
+}
+
+impl Trade {
+    pub fn t1CommitAmount(&self) -> U256 {
+        self.bid.charge.div_mod(U256::from_dec_str("2").unwrap()).0
+    }
+
+    pub fn t2CommitAmount(&self) -> U256 {
+        self.bid.charge
+    }
+
+    pub fn update_waiting_status(&mut self) {
+        match self.status {
+            TradeStatus::WaitingStartCommit => {
+                self.status = TradeStatus::RSendT1Commit;
+            }
+            TradeStatus::WaitingRT1Commit => {
+                self.status = TradeStatus::PSendT1Commit;
+            }
+            TradeStatus::WaitingPT1Commit => {
+                self.status = TradeStatus::RSendT2Commit;
+            }
+            TradeStatus::WaitingRT2Commit => {
+                self.status = TradeStatus::PFulfillService;
+            }
+            _ => {}
+        }
+    }
+
+    pub fn update_sending_status(&mut self) {
+        match self.status {
+            TradeStatus::PSendStartCommit => {
+                self.status = TradeStatus::WaitingRT1Commit;
+            }
+            TradeStatus::RSendT1Commit => {
+                self.status = TradeStatus::WaitingPT1Commit;
+            }
+
+            TradeStatus::PSendT1Commit => {
+                self.status = TradeStatus::WaitingRT2Commit;
+            }
+            TradeStatus::RSendT2Commit => {
+                self.status = TradeStatus::WaitingForService;
+            }
+            _ => {}
+        }
+    }
+
+    pub fn is_sending_status(&self) -> bool {
+        self.status == TradeStatus::PSendStartCommit
+            || self.status == TradeStatus::RSendT1Commit
+            || self.status == TradeStatus::PSendT1Commit
+            || self.status == TradeStatus::RSendT2Commit
+    }
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+enum CommitType {
+    /// Commitment Type 1
+    T1 = 1,
+    /// Commitment Type 2
+    T2 = 2,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+pub struct Commit {
+    /// index used for the commitment
+    index: u32,
+    /// epoch during which the commitment is valid
+    epoch: u32,
+    /// unique id that identifies commitment with the
+    /// corresponding query id
+    u: u32,
+    /// commit type 1 or 2
+    c_type: CommitType,
+    /// address that invalidates the commitment
+    i_address: Address,
+    /// address that can redeeem this commitment
+    /// with invalidating signature.
+    /// Only needed for c_type = 2
+    r_address: Address,
+    /// owner's signature on commitment's blob
+    signature: Option<Signature>,
+}
+
+impl Commit {
+    pub fn commit_hash(&self) -> H256 {
+        let mut blob: [u8; 160] = [0; 160];
+        U256::from(self.index).to_little_endian(&mut blob[32..64]);
+        U256::from(self.epoch).to_little_endian(&mut blob[64..96]);
+        U256::from(self.u).to_little_endian(&mut blob[96..128]);
+        U256::from(self.c_type.clone() as u32).to_little_endian(&mut blob[128..160]);
+
+        let mut blob: Vec<u8> = Vec::from(blob);
+
+        blob.extend_from_slice(self.i_address.as_bytes());
+
+        // r_address is added for commitment type 2
+        if self.c_type == CommitType::T2 {
+            blob.extend_from_slice(self.r_address.as_bytes());
+        }
+
+        keccak256(blob.as_slice()).into()
+    }
 }
 
 /// tree that stores trades for every query
@@ -106,7 +237,10 @@ impl Storage {
 
         // BidderId uniquely identifies a bid received for
         // the query sent
-        bids.insert(bid.bidder_id.to_bytes(), bincode::serialize(&bid).unwrap());
+        bids.insert(
+            bid.provider_id.to_bytes(),
+            bincode::serialize(&bid).unwrap(),
+        );
     }
 
     /// Adds bid placed by the provider (i.e. node) for a
@@ -156,11 +290,35 @@ impl Storage {
         let trade = Trade {
             query,
             bid,
-            status: TradeStatus::BidAccepted,
+            status: if is_requester {
+                TradeStatus::WaitingStartCommit
+            } else {
+                TradeStatus::PSendStartCommit
+            },
             query_id: query.id,
             is_requester,
         };
         trades.insert(query.id.to_be_bytes(), bincode::serialize(&trade).unwrap());
+    }
+
+    /// Get all active trades
+    pub fn get_active_trades(&self) -> Vec<Trade> {
+        let mut db = self.db.lock().unwrap();
+        let trades = db
+            .open_tree(ACTIVE_TRADES)
+            .expect("db: failed to open tree");
+        trades
+            .iter()
+            .filter_map(|val| {
+                val.map_or_else(
+                    |_| None,
+                    |(id, trade)| {
+                        bincode::deserialize::<Trade>(&trade)
+                            .map_or_else(|_| None, |trade| Some(trade))
+                    },
+                )
+            })
+            .collect()
     }
 
     /// Finds query sent by query id
@@ -241,7 +399,7 @@ impl Storage {
                         bincode::deserialize::<Trade>(&val)
                             .and_then(|trade| {
                                 Ok(trade.query_id == *query_id
-                                    && trade.bid.bidder_id == *provider_id
+                                    && trade.bid.provider_id == *provider_id
                                     && trade.query.requester_id == *requester_id)
                             })
                             .map_err(|e| anyhow::Error::from(e))

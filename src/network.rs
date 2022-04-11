@@ -16,7 +16,7 @@ use libp2p::kad::record::store::MemoryStore;
 use libp2p::kad::record::Key;
 use libp2p::kad::{
     Addresses, BootstrapError, GetRecordError, GetRecordOk, Kademlia, KademliaConfig,
-    KademliaEvent, PutRecordOk, QueryId, QueryResult, Quorum, Record,
+    KademliaEvent, KademliaStoreInserts, PutRecordOk, QueryId, QueryResult, Quorum, Record,
 };
 use libp2p::mdns::{Mdns, MdnsConfig, MdnsEvent};
 use libp2p::mplex::MplexConfig;
@@ -61,6 +61,7 @@ impl Behaviour {
         let mut kad_config = KademliaConfig::default();
         kad_config.set_protocol_name("/dse/kad/1.0.0".as_bytes());
         kad_config.set_query_timeout(Duration::from_secs(300));
+        kad_config.set_record_filtering(KademliaStoreInserts::FilterBoth);
         // set disjoint_query_paths to true. Ref: https://discuss.libp2p.io/t/s-kademlia-lookups-over-disjoint-paths-in-rust-libp2p/571
         kad_config.disjoint_query_paths(true);
         let kademlia = Kademlia::with_config(peer_id, store, kad_config);
@@ -469,6 +470,11 @@ impl Network {
             SwarmEvent::Behaviour(BehaviourEvent::Mdns(event)) => {
                 emit_event(&self.network_event_sender, NetworkEvent::Mdns(event)).await;
             }
+            // KademliaStoreInserts is set to FilterBoth so that we can
+            // validate AddProvider request from a peer that indicates an exchange
+            // with peer referenced in key using atleast one valid commit from peer
+            // referenced in key.
+            // Validation implementation ref - https://gitlab.com/etrovub/smartnets/glycos/glycos/-/blob/6b1f513dd5d502ca3a8d429934a87b1a2adf0640/glycos/src/net/mod.rs
             SwarmEvent::Behaviour(BehaviourEvent::Kademlia(
                 KademliaEvent::OutboundQueryCompleted { id, result, .. },
             )) => match result {
@@ -547,7 +553,6 @@ impl Network {
                     peer, addresses
                 );
 
-                // TODO: I haven't taken care of eviction of old peers here
                 // self.known_peers.insert(peer, addresses);
             }
             SwarmEvent::Behaviour(BehaviourEvent::Gossipsub(GossipsubEvent::Message {
@@ -921,8 +926,7 @@ pub enum DseMessageRequest {
     /// to the Requester
     PlaceBid {
         query_id: indexer::QueryId,
-        bid: storage::Bid
-        ,
+        bid: storage::Bid,
     },
     /// Requester sends bid acceptance to
     /// Provider along with wallet address.

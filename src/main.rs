@@ -20,6 +20,7 @@ mod network_client;
 mod server;
 mod storage;
 mod subscription;
+mod commit_procedure;
 
 #[derive(Debug, StructOpt)]
 #[structopt(name = "DSE args")]

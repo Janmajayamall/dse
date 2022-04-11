@@ -2,8 +2,6 @@ use anyhow::Ok;
 use ethers::prelude::*;
 use std::{str::FromStr, sync::Arc};
 
-use super::commitment;
-
 abigen!(
     WalletContract,
     "./src/wallet.json",

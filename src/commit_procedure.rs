@@ -23,7 +23,6 @@ impl CommitProcedure {
 
         // Update trade status
         self.trade.update_waiting_status();
-
-        // Store the commit
+        self.storage.update_active_trade(self.trade.clone());
     }
 }

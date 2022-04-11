@@ -34,15 +34,15 @@ pub enum ServerEvent {
 pub enum SendWssMessage {
     /// notify client of received bid
     ReceivedBid {
-        bid: indexer::BidReceivedWithStatus,
-        query_id: indexer::QueryId,
+        bid: storage::Bid,
+        query_id: storage::QueryId,
     },
 
     /// notify client received query
-    ReceivedQuery { query: indexer::QueryReceived },
+    ReceivedQuery { query: storage::Query },
 
     /// notify client of bid acceptance
-    ReceivedBidAcceptance { query_id: indexer::QueryId },
+    ReceivedBidAcceptance { query_id: storage::QueryId },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -55,16 +55,13 @@ pub enum ReceivedMessage {
 
     /// received bid acceptance from client
     AcceptBid {
-        query_id: indexer::QueryId,
+        query_id: storage::QueryId,
         provider_id: PeerId,
     },
 
     /// received start commit from client
-    StartCommit { query_id: indexer::QueryId },
+    StartCommit { query_id: storage::QueryId },
 }
-
-// counter for server client id
-static ID_COUNTER: AtomicUsize = AtomicUsize::new(1);
 
 #[derive(Clone)]
 struct Server {
@@ -155,7 +152,13 @@ async fn handle_post(
     match recv_message {
         ReceivedMessage::NewQuery { query } => {
             // FIXME: Switch to chaining
-            match storage::Query::from_data(query, server.network_client.clone()).await {
+            match storage::Query::from_data(
+                query,
+                server.network_client.clone(),
+                server.ethnode.timelocked_wallet,
+            )
+            .await
+            {
                 Ok(query) => {
                     match server
                         .network_client
@@ -171,7 +174,13 @@ async fn handle_post(
         }
         ReceivedMessage::PlaceBid { bid } => {
             // FIXME: Switch to chaining
-            match storage::Bid::from_data(bid, server.network_client.clone()).await {
+            match storage::Bid::from_data(
+                bid,
+                server.network_client.clone(),
+                server.ethnode.timelocked_wallet,
+            )
+            .await
+            {
                 Ok(bid) => {
                     // Check that query for which the bid is received was received
                     // before over p2p network
@@ -227,14 +236,12 @@ async fn handle_post(
                     .network_client
                     .send_dse_message_request(
                         bid.provider_id,
-                        network::DseMessageRequest::AcceptBid {
-                            query_id,
-                            requester_wallet_address: server.ethnode.timelocked_wallet,
-                        },
+                        network::DseMessageRequest::AcceptBid { query_id },
                     )
                     .await
                 {
                     Ok(network::DseMessageResponse::Ack) => {
+                        // Requester does not P
                         server.storage.add_new_trade(query, bid, true);
                         Ok(Box::new(http::StatusCode::OK))
                     }
@@ -273,10 +280,7 @@ async fn handle_post(
                     .network_client
                     .send_dse_message_request(
                         trade.query.requester_id,
-                        network::DseMessageRequest::StartCommit {
-                            query_id,
-                            provider_wallet_addr: server.ethnode.timelocked_wallet,
-                        },
+                        network::DseMessageRequest::StartCommit { query_id },
                     )
                     .await
                 {
@@ -323,7 +327,7 @@ async fn handle_get_querybids(
 }
 
 async fn ws_connection_established(ws: WebSocket, server: Server) {
-    let id = ID_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let id = server.storage.next_client_id();
     let (mut ws_sender, mut ws_receiver) = ws.split();
     let (sender, mut receiver) = mpsc::unbounded_channel::<SendWssMessage>();
 

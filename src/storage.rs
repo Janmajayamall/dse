@@ -6,9 +6,12 @@ use libp2p::{Multiaddr, PeerId};
 use serde::{Deserialize, Serialize};
 use sled::{Config, Db};
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::sync::{
+    atomic::{AtomicUsize, Ordering},
+    Arc, Mutex,
+};
 
-type QueryId = u32;
+pub type QueryId = u32;
 
 use super::network_client;
 
@@ -19,18 +22,20 @@ pub struct QueryData {
     query_string: String,
 }
 
-#[derive(Deserialize, Serialize, Debug)]
+#[derive(Deserialize, Serialize, Debug, Clone)]
 pub struct Query {
     pub id: QueryId,
     pub data: QueryData,
     pub requester_addr: Multiaddr,
     pub requester_id: PeerId,
+    pub requester_wallet_address: Address,
 }
 
 impl Query {
     pub async fn from_data(
         data: QueryData,
         mut network_client: network_client::Client,
+        wallet_address: Address,
     ) -> anyhow::Result<Self> {
         network_client
             .network_details()
@@ -41,6 +46,7 @@ impl Query {
                     data,
                     requester_id,
                     requester_addr,
+                    requester_wallet_address: wallet_address,
                 })
             })
     }
@@ -57,6 +63,7 @@ pub struct Bid {
     pub query_id: QueryId,
     pub provider_addr: Multiaddr,
     pub provider_id: PeerId,
+    pub provider_wallet_address: Address,
     pub charge: U256,
 }
 
@@ -64,6 +71,7 @@ impl Bid {
     pub async fn from_data(
         data: BidData,
         mut network_client: network_client::Client,
+        wallet_address: Address,
     ) -> anyhow::Result<Self> {
         network_client
             .network_details()
@@ -74,12 +82,13 @@ impl Bid {
                     provider_id,
                     provider_addr,
                     charge: data.charge,
+                    provider_wallet_address: wallet_address,
                 })
             })
     }
 }
 
-#[derive(Deserialize, Serialize, Debug, PartialEq)]
+#[derive(Deserialize, Serialize, Debug, PartialEq, Clone)]
 // P = BidAccepted
 // R = Waiting Start Commit
 // P = Waiting T1 Commit
@@ -119,7 +128,7 @@ pub enum TradeStatus {
 
 /// Stores trade infor between
 /// node and some peer
-#[derive(Deserialize, Serialize, Debug)]
+#[derive(Deserialize, Serialize, Debug, Clone)]
 pub struct Trade {
     /// Trade query
     pub query: Query,
@@ -132,10 +141,6 @@ pub struct Trade {
     /// Flag whether node is requester
     /// OR provider
     pub is_requester: bool,
-    /// Wallet address of requester
-    pub requester_wallet_address: Address,
-    /// Wallet address of provider
-    pub provider_wallet_address: Address,
 }
 
 impl Trade {
@@ -264,6 +269,8 @@ pub struct Storage {
     /// Graphs include - AllTrades, ActiveTrades
     /// QueriesSent
     db: Mutex<Db>,
+    /// ID counter of clients
+    client_id_counter: AtomicUsize,
 }
 
 impl Storage {
@@ -567,5 +574,9 @@ impl Storage {
                 || Err(anyhow::anyhow!("Not found")),
                 |val| Ok(bincode::deserialize::<Trade>(&val?.1)?),
             )
+    }
+
+    pub fn next_client_id(&self) -> usize {
+        self.client_id_counter.fetch_add(1, Ordering::Relaxed)
     }
 }

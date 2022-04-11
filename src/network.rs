@@ -39,7 +39,6 @@ use std::time::Duration;
 use tokio::sync::{mpsc, oneshot};
 use tokio::{io, select};
 
-use super::commitment;
 use super::indexer;
 use super::storage;
 
@@ -79,15 +78,11 @@ impl Behaviour {
             .validation_mode(gossipsub::ValidationMode::Strict)
             .build()
             .map_err(anyhow::Error::msg)?;
-        let mut gossipsub = Gossipsub::new(
+        let gossipsub = Gossipsub::new(
             gossipsub::MessageAuthenticity::Signed(keypair.clone()),
             gossipsub_config,
         )
         .map_err(anyhow::Error::msg)?;
-
-        // by default subcribe to search query topic
-        gossipsub.subscribe(&GossipsubTopic::Query.ident_topic())?;
-        debug!("gosipsub subscribed");
 
         // request response
         let request_response = RequestResponse::new(
@@ -244,13 +239,42 @@ pub struct Network {
 }
 
 impl Network {
-    pub async fn new(keypair: Keypair) -> Result<Self, anyhow::Error> {
+    pub async fn new(
+        keypair: Keypair,
+        bootstrap_peers: Vec<(PeerId, Multiaddr)>,
+    ) -> Result<Self, anyhow::Error> {
         // Build swarm
         let transport = build_transport(&keypair)?;
         let behaviour = Behaviour::new(&keypair).await?;
-        let swarm = SwarmBuilder::new(transport, behaviour, keypair.public().to_peer_id())
+        let mut swarm = SwarmBuilder::new(transport, behaviour, keypair.public().to_peer_id())
             .executor(Box::new(CustomExecutor))
             .build();
+
+        // subscribe to search query topic
+        swarm
+            .behaviour_mut()
+            .gossipsub
+            .subscribe(&GossipsubTopic::Query.ident_topic())?;
+        debug!("gosipsub subscribed");
+
+        // Add bootstrap peers to kad routing table
+        for (peer_id, addr) in bootstrap_peers {
+            swarm.behaviour_mut().kademlia.add_address(&peer_id, addr);
+        }
+
+        // Bootstrap
+        if let Err(e) = swarm.behaviour_mut().kademlia.bootstrap() {
+            error!("Failed to bootstrap node with error {}", e);
+        }
+
+        // Start listening on default addr
+        // TODO: make listen address configurable
+        if let Err(e) = swarm.listen_on("/ip4/0.0.0.0/tcp/0".parse()?) {
+            error!(
+                "Failed to start listening on default address with error {}",
+                e
+            );
+        }
 
         let (command_sender, command_receiver) = mpsc::channel(10);
         let (network_event_sender, network_event_receiver) = channel::unbounded();
@@ -861,91 +885,27 @@ impl GossipsubTopic {
     }
 }
 
-#[derive(Deserialize, Serialize, Debug, Clone, PartialEq)]
-pub enum CommitRequest {
-    /// Ask for wallet address
-    WalletAddress(indexer::QueryId),
-    /// Ask for commitment
-    CommitFund {
-        query_id: indexer::QueryId,
-        round: u32,
-    },
-    /// Invalidating Signature
-    /// Sent by service requester
-    InvalidatingSignature {
-        query_id: indexer::QueryId,
-        invalidating_signature: ethers::types::Signature,
-    },
-    /// End commit procedure
-    EndCommit(indexer::QueryId),
-}
-
-#[derive(Deserialize, Serialize, Debug, Clone, PartialEq)]
-pub enum CommitResponse {
-    /// Wallet address response
-    WalletAddress {
-        query_id: indexer::QueryId,
-        wallet_address: ethers::types::Address,
-    },
-    /// CommitFund response
-    CommitFund {
-        query_id: indexer::QueryId,
-        round: u32,
-        commitment: commitment::Commit,
-    },
-    /// Ack InvalidatingSignature
-    AckInvalidatingSignature(indexer::QueryId),
-    /// Ack End Commit
-    AckEndCommit(indexer::QueryId),
-}
-
-#[derive(Deserialize, Serialize, Debug, Clone, PartialEq)]
-pub enum IndexerRequest {
-    /// Place bid for a query
-    PlaceBid(indexer::BidReceived),
-    /// Accept a bid for a query
-    AcceptBid(indexer::QueryId),
-    /// Start commit procedure
-    StartCommit(indexer::QueryId),
-}
-
-#[derive(Deserialize, Serialize, Debug, Clone, PartialEq)]
-pub enum IndexerResponse {
-    /// Ack that bid was received
-    AckBid(indexer::QueryId),
-    /// Ack that bid acceptance was received
-    AckAcceptBid(indexer::QueryId),
-    /// Ack that start commit was received
-    AckStartCommit(indexer::QueryId),
-}
-
 // All stuff related to request response
 #[derive(Deserialize, Serialize, Debug, Clone, PartialEq)]
 pub enum DseMessageRequest {
     /// Provider places bid for a query
     /// to the Requester
     PlaceBid {
-        query_id: indexer::QueryId,
+        query_id: storage::QueryId,
         bid: storage::Bid,
     },
     /// Requester sends bid acceptance to
     /// Provider along with wallet address.
-    AcceptBid {
-        query_id: indexer::QueryId,
-        requester_wallet_address: ethers::types::Address,
-    },
+    AcceptBid { query_id: storage::QueryId },
     /// Provider sends start commit procedure
     /// to Requester along with wallet address.
-    StartCommit {
-        query_id: indexer::QueryId,
-        provider_wallet_addr: ethers::types::Address,
-    },
+    StartCommit { query_id: storage::QueryId },
     /// Requester sends T1 commitment to Provider
     ///
     /// This request acknowledges that requester's
     /// wallet address is suitable for exchange
     T1RequesterCommit {
-        query_id: indexer::QueryId,
+        query_id: storage::QueryId,
         commit: String,
     },
     /// Provider sends T1 commitment to Requester
@@ -953,7 +913,7 @@ pub enum DseMessageRequest {
     /// This request acknowledges that Requester's T1
     /// commitment is valid
     T1ProviderCommit {
-        query_id: indexer::QueryId,
+        query_id: storage::QueryId,
         commit: String,
     },
     /// Requester sends T2 commitment to Provider
@@ -961,19 +921,19 @@ pub enum DseMessageRequest {
     /// This request acknowledges that Provider's T1
     /// commitment is valid
     T2RequesterCommit {
-        query_id: indexer::QueryId,
+        query_id: storage::QueryId,
         commit: String,
     },
     /// Provider sends acknowledgement to Requester
     /// that T2 commit is valid
-    T2CommitValid { query_id: indexer::QueryId },
+    T2CommitValid { query_id: storage::QueryId },
     /// Provider sends response (i.e. provides service)
     /// to the reqester
-    Service { query_id: indexer::QueryId },
+    Service { query_id: storage::QueryId },
     /// Requester sends invaldating signature for commits
     /// to the Provider
     InvalidatingSignature {
-        query_id: indexer::QueryId,
+        query_id: storage::QueryId,
         invalidating_signature: ethers::types::Signature,
     },
 }
@@ -984,10 +944,6 @@ pub enum DseMessageResponse {
     Ack,
     /// Bad request
     Bad,
-    /// Responses related to indexer
-    Indexer(IndexerResponse),
-    /// Responss related to commit fund
-    Commit(CommitResponse),
 }
 
 #[derive(Debug, Clone)]

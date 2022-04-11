@@ -10,6 +10,8 @@ use std::sync::{Arc, Mutex};
 
 type QueryId = u32;
 
+use super::network_client;
+
 /// Stores qeury string and
 /// other realted info to the query
 #[derive(Deserialize, Serialize, Debug, Clone)]
@@ -25,12 +27,56 @@ pub struct Query {
     pub requester_id: PeerId,
 }
 
+impl Query {
+    pub async fn from_data(
+        data: QueryData,
+        mut network_client: network_client::Client,
+    ) -> anyhow::Result<Self> {
+        network_client
+            .network_details()
+            .await
+            .and_then(|(requester_id, requester_addr)| {
+                Ok(Query {
+                    id: Default::default(),
+                    data,
+                    requester_id,
+                    requester_addr,
+                })
+            })
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BidData {
+    query_id: QueryId,
+    charge: ethers::types::U256,
+}
+
 #[derive(Deserialize, Serialize, Debug, Clone, PartialEq)]
 pub struct Bid {
-    query_id: QueryId,
-    provider_addr: Multiaddr,
-    provider_id: PeerId,
-    charge: U256,
+    pub query_id: QueryId,
+    pub provider_addr: Multiaddr,
+    pub provider_id: PeerId,
+    pub charge: U256,
+}
+
+impl Bid {
+    pub async fn from_data(
+        data: BidData,
+        mut network_client: network_client::Client,
+    ) -> anyhow::Result<Self> {
+        network_client
+            .network_details()
+            .await
+            .and_then(|(provider_id, provider_addr)| {
+                Ok(Bid {
+                    query_id: data.query_id,
+                    provider_id,
+                    provider_addr,
+                    charge: data.charge,
+                })
+            })
+    }
 }
 
 #[derive(Deserialize, Serialize, Debug, PartialEq)]
@@ -258,12 +304,12 @@ impl Storage {
     /// Adds new query published by the requester (i.e. node)
     pub fn add_query_sent(&self, query: Query) {
         let mut db = self.db.lock().unwrap();
-        let queries_sent = db.open_tree(QUERIES_SENT).expect("db: failed to open tree");
+        let queries = db.open_tree(QUERIES_SENT).expect("db: failed to open tree");
 
         // TODO: check that you are not overwriting
         // previous query with same id.
 
-        queries_sent.insert(query.id.to_be_bytes(), bincode::serialize(&query).unwrap());
+        queries.insert(query.id.to_be_bytes(), bincode::serialize(&query).unwrap());
     }
 
     /// Adds new query received by the provider over gossipsub
@@ -301,6 +347,27 @@ impl Storage {
         trades.insert(query.id.to_be_bytes(), bincode::serialize(&trade).unwrap());
     }
 
+    /// Updates Active Trade
+    ///
+    /// Returns err if Trade does not pre-exists.
+    pub fn update_active_trade(&self, trade: Trade) -> anyhow::Result<()> {
+        self.find_active_trade(
+            &trade.query_id,
+            &trade.bid.provider_id,
+            &trade.query.requester_id,
+        )
+        .and_then(|_| {
+            let mut db = self.db.lock().unwrap();
+            db.open_tree(ACTIVE_TRADES)
+                .expect("db: failed to open tree")
+                .insert(
+                    trade.query_id.to_be_bytes(),
+                    bincode::serialize(&trade).unwrap(),
+                );
+            Ok(())
+        })
+    }
+
     /// Get all active trades
     pub fn get_active_trades(&self) -> Vec<Trade> {
         let mut db = self.db.lock().unwrap();
@@ -315,6 +382,59 @@ impl Storage {
                     |(id, trade)| {
                         bincode::deserialize::<Trade>(&trade)
                             .map_or_else(|_| None, |trade| Some(trade))
+                    },
+                )
+            })
+            .collect()
+    }
+
+    /// Get all queries sent by the user
+    pub fn get_all_queries_sent(&self) -> Vec<Query> {
+        let mut db = self.db.lock().unwrap();
+        db.open_tree(QUERIES_SENT)
+            .expect("db: failed to open tree")
+            .iter()
+            .filter_map(|val| {
+                val.map_or_else(
+                    |_| None,
+                    |(id, query)| {
+                        bincode::deserialize::<Query>(&query)
+                            .map_or_else(|_| None, |query| Some(query))
+                    },
+                )
+            })
+            .collect()
+    }
+
+    /// Get all queries received over p2p network
+    pub fn get_all_queries_recv(&self) -> Vec<Query> {
+        let mut db = self.db.lock().unwrap();
+        db.open_tree(QUERIES_RECEIVED)
+            .expect("db: failed to open tree")
+            .iter()
+            .filter_map(|val| {
+                val.map_or_else(
+                    |_| None,
+                    |(id, query)| {
+                        bincode::deserialize::<Query>(&query)
+                            .map_or_else(|_| None, |query| Some(query))
+                    },
+                )
+            })
+            .collect()
+    }
+
+    /// Find all bids received for a query by query id
+    pub fn find_all_bids_recv_by_query_id(&self, query_id: &QueryId) -> Vec<Bid> {
+        let mut db = self.db.lock().unwrap();
+        db.open_tree([BIDS_RECEIVED, &query_id.to_be_bytes()].concat())
+            .expect("db: failed to open tree")
+            .iter()
+            .filter_map(|val| {
+                val.map_or_else(
+                    |_| None,
+                    |(id, bid)| {
+                        bincode::deserialize::<Bid>(&bid).map_or_else(|_| None, |bid| Some(bid))
                     },
                 )
             })
@@ -375,6 +495,39 @@ impl Storage {
             })
             .map_or_else(
                 || Err(anyhow::anyhow!("Not found")),
+                |val| Ok(bincode::deserialize::<Bid>(&val?.1)?),
+            )
+    }
+
+    // Find bid received by query id & provider id
+    pub fn find_bid_received(
+        &self,
+        query_id: &QueryId,
+        provider_id: &PeerId,
+    ) -> anyhow::Result<Bid> {
+        let mut db = self.db.lock().unwrap();
+        let bids = db
+            .open_tree(BIDS_RECEIVED)
+            .expect("db: failed to open tree");
+        bids.iter()
+            .find(|val| {
+                if let Ok(flag) = val
+                    .map_err(|e| anyhow::Error::from(e))
+                    .and_then(|(id, bid)| {
+                        bincode::deserialize::<Bid>(&bid)
+                            .map_err(|e| anyhow::Error::from(e))
+                            .and_then(|bid| {
+                                Ok(bid.query_id == *query_id && bid.provider_id == *provider_id)
+                            })
+                    })
+                {
+                    flag
+                } else {
+                    false
+                }
+            })
+            .map_or_else(
+                || Err(anyhow::anyhow!("Not Found")),
                 |val| Ok(bincode::deserialize::<Bid>(&val?.1)?),
             )
     }

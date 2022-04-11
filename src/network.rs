@@ -982,6 +982,8 @@ pub enum DseMessageRequest {
 pub enum DseMessageResponse {
     /// Acknowledges the request
     Ack,
+    /// Bad request
+    Bad,
     /// Responses related to indexer
     Indexer(IndexerResponse),
     /// Responss related to commit fund

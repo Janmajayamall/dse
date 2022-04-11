@@ -478,7 +478,7 @@ impl Indexer {
                         }
                         ReceivedMessage::AcceptBid {
                             query_id,
-                            bidder_id,
+                            provider_id,
                         } => {
                             // // check such a bid by bidder for query exists
                             // match self

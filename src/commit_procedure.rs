@@ -2,8 +2,8 @@ use super::ethnode::EthNode;
 use super::network::DseMessageRequest;
 use super::network_client;
 use super::storage::{self, TradeStatus};
-use async_std::channel;
 use std::sync::Arc;
+use tokio::sync::{broadcast, mpsc};
 use tokio::time;
 
 // responsible for check whether
@@ -12,7 +12,7 @@ pub struct CommitProcedure {
     trade: storage::Trade,
     network_client: network_client::Client,
     ethnode: EthNode,
-    event_sender: channel::Sender<CommitProcedureEvent>,
+    event_sender: mpsc::Sender<CommitProcedureEvent>,
 }
 
 pub enum CommitProcedureEvent {
@@ -26,7 +26,7 @@ impl CommitProcedure {
         trade: storage::Trade,
         network_client: network_client::Client,
         ethnode: EthNode,
-        event_sender: channel::Sender<CommitProcedureEvent>,
+        event_sender: mpsc::Sender<CommitProcedureEvent>,
     ) -> Self {
         Self {
             storage,
@@ -50,8 +50,7 @@ impl CommitProcedure {
         // update trade status to suitable processing status
         self.update_trade_processing_status();
 
-        // Perforn commit procedure
-
+        // Perform commit procedure
         // Simulates verification
         let mut interval = time::interval(time::Duration::from_secs(5));
         interval.tick().await;
@@ -97,7 +96,8 @@ impl CommitProcedure {
                     .await;
             }
             Err(_) => {
-                self.event_sender
+                let _ = self
+                    .event_sender
                     .send(CommitProcedureEvent::SendFailed {
                         query_id: self.trade.query_id,
                     })
@@ -152,13 +152,13 @@ impl CommitProcedure {
     fn update_trade_waiting_status(&mut self) {
         match self.trade.status {
             TradeStatus::PSendT1Commit => {
-                self.trade.status = TradeStatus::WaitingRT2Commit;
+                self.trade.update_status(TradeStatus::WaitingRT2Commit);
             }
             TradeStatus::RSendT1Commit => {
-                self.trade.status = TradeStatus::WaitingPT1Commit;
+                self.trade.update_status(TradeStatus::WaitingPT1Commit);
             }
             TradeStatus::RSendT2Commit => {
-                self.trade.status = TradeStatus::WaitingForService;
+                self.trade.update_status(TradeStatus::WaitingForService);
             }
             _ => {}
         }
@@ -170,13 +170,13 @@ impl CommitProcedure {
     fn update_trade_processing_status(&mut self) {
         match self.trade.status {
             TradeStatus::WaitingRT1Commit => {
-                self.trade.status = TradeStatus::ProcessingRT1Commit;
+                self.trade.update_status(TradeStatus::ProcessingRT1Commit);
             }
             TradeStatus::WaitingPT1Commit => {
-                self.trade.status = TradeStatus::ProcessingPT1Commit;
+                self.trade.update_status(TradeStatus::ProcessingPT1Commit);
             }
             TradeStatus::WaitingRT2Commit => {
-                self.trade.status = TradeStatus::ProcessingRT2Commit;
+                self.trade.update_status(TradeStatus::ProcessingRT2Commit);
             }
             _ => {}
         }
@@ -188,13 +188,13 @@ impl CommitProcedure {
     fn update_trade_send_status(&mut self) {
         match self.trade.status {
             TradeStatus::ProcessingRT1Commit => {
-                self.trade.status = TradeStatus::PSendT1Commit;
+                self.trade.update_status(TradeStatus::PSendT1Commit);
             }
             TradeStatus::ProcessingPT1Commit => {
-                self.trade.status = TradeStatus::RSendT2Commit;
+                self.trade.update_status(TradeStatus::RSendT2Commit);
             }
             TradeStatus::ProcessingRT2Commit => {
-                self.trade.status = TradeStatus::PFulfillService;
+                self.trade.update_status(TradeStatus::PFulfillService);
             }
             _ => {}
         }

@@ -30,13 +30,13 @@ use libp2p::swarm::{ConnectionHandlerUpgrErr, SwarmBuilder, SwarmEvent};
 use libp2p::tcp::TokioTcpConfig;
 use libp2p::yamux::YamuxConfig;
 use libp2p::{Multiaddr, NetworkBehaviour, PeerId, Swarm, Transport};
-use log::{debug, error, info};
+use log::{debug, error, info, warn};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::convert::TryFrom;
 use std::error::Error;
 use std::time::Duration;
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{broadcast, mpsc, oneshot};
 use tokio::{io, select};
 
 use super::indexer;
@@ -149,40 +149,6 @@ impl libp2p::core::Executor for CustomExecutor {
     }
 }
 
-/// Creates a new network interface. Also
-/// sets up network event stream
-// pub async fn new(
-//     seed: Option<u8>,
-//     command_receiver: mpsc::Receiver<Command>,
-// ) -> Result<(mpsc::Receiver<NetworkEvent>, Network), Box<dyn Error>> {
-//     // FIXME: keypair generation should happen in daemon
-//     let keypair = match seed {
-//         Some(seed) => {
-//             let mut bytes = [0u8; 32];
-//             bytes[0] = seed;
-//             let secret_key = secp256k1::SecretKey::from_bytes(bytes).expect("Invalid seed");
-//             Keypair::Secp256k1(secret_key.into())
-//         }
-//         None => Keypair::generate_secp256k1(),
-//     };
-//     let peer_id = keypair.public().to_peer_id();
-//     debug!("Node peer id {:?} ", peer_id.to_base58());
-
-//     // Build swarm
-//     let transport = build_transport(&keypair)?;
-//     let behaviour = Behaviour::new(&keypair).await;
-//     let swarm = SwarmBuilder::new(transport, behaviour, peer_id)
-//         .executor(Box::new(CustomExecutor))
-//         .build();
-
-//     let (network_event_sender, network_event_receiver) = mpsc::channel::<NetworkEvent>(10);
-
-//     // network interface
-//     let network_interface = Network::new(keypair, swarm, command_receiver, network_event_sender);
-
-//     Ok((network_event_receiver, network_interface))
-// }
-
 /// Uses TCP encrypted using noise DH and MPlex for multiplexing
 pub fn build_transport(identity_keypair: &Keypair) -> io::Result<Boxed<(PeerId, StreamMuxerBox)>> {
     // noise config
@@ -214,8 +180,8 @@ pub struct Network {
 
     command_sender: mpsc::Sender<Command>,
     command_receiver: mpsc::Receiver<Command>,
-    network_event_sender: channel::Sender<NetworkEvent>,
-    network_event_receiver: channel::Receiver<NetworkEvent>,
+    network_event_sender: broadcast::Sender<NetworkEvent>,
+    network_event_receiver: broadcast::Receiver<NetworkEvent>,
 
     pending_dht_put_requests: HashMap<QueryId, oneshot::Sender<Result<PutRecordOk, anyhow::Error>>>,
     pending_dht_get_requests: HashMap<QueryId, oneshot::Sender<Result<GetRecordOk, anyhow::Error>>>,
@@ -242,6 +208,7 @@ impl Network {
     pub async fn new(
         keypair: Keypair,
         bootstrap_peers: Vec<(PeerId, Multiaddr)>,
+        listen_on: Multiaddr,
     ) -> Result<Self, anyhow::Error> {
         // Build swarm
         let transport = build_transport(&keypair)?;
@@ -255,21 +222,32 @@ impl Network {
             .behaviour_mut()
             .gossipsub
             .subscribe(&GossipsubTopic::Query.ident_topic())?;
-        debug!("gosipsub subscribed");
+        debug!("gosipsub subscribed ");
 
         // Add bootstrap peers to kad routing table
         for (peer_id, addr) in bootstrap_peers {
-            swarm.behaviour_mut().kademlia.add_address(&peer_id, addr);
+            swarm
+                .behaviour_mut()
+                .kademlia
+                .add_address(&peer_id, addr.clone());
+
+            // dial in
+            if let Err(e) = swarm.dial(addr.clone()) {
+                warn!(
+                    "Dial in failed for peer_id {} at address {} with error :{}",
+                    peer_id, addr, e
+                );
+            }
         }
 
         // Bootstrap
         if let Err(e) = swarm.behaviour_mut().kademlia.bootstrap() {
-            error!("Failed to bootstrap node with error {}", e);
+            warn!("Failed to bootstrap node with error {}", e);
         }
 
         // Start listening on default addr
         // TODO: make listen address configurable
-        if let Err(e) = swarm.listen_on("/ip4/0.0.0.0/tcp/0".parse()?) {
+        if let Err(e) = swarm.listen_on(listen_on) {
             error!(
                 "Failed to start listening on default address with error {}",
                 e
@@ -277,7 +255,7 @@ impl Network {
         }
 
         let (command_sender, command_receiver) = mpsc::channel(10);
-        let (network_event_sender, network_event_receiver) = channel::unbounded();
+        let (network_event_sender, network_event_receiver) = broadcast::channel(20);
 
         Ok(Self {
             keypair,
@@ -323,8 +301,8 @@ impl Network {
         }
     }
 
-    pub fn network_event_receiver(&self) -> channel::Receiver<NetworkEvent> {
-        self.network_event_receiver.clone()
+    pub fn network_event_receiver(&self) -> broadcast::Receiver<NetworkEvent> {
+        self.network_event_sender.subscribe()
     }
 
     pub fn network_command_sender(&self) -> mpsc::Sender<Command> {
@@ -492,7 +470,32 @@ impl Network {
     ) {
         match event {
             SwarmEvent::Behaviour(BehaviourEvent::Mdns(event)) => {
-                emit_event(&self.network_event_sender, NetworkEvent::Mdns(event)).await;
+                // emit_event(&self.network_event_sender, NetworkEvent::Mdns(event)).await;
+                match event {
+                    MdnsEvent::Discovered(nodes) => {
+                        // Add discovered nodes to
+                        // kad routing table
+                        for (peer, address) in nodes {
+                            debug!(
+                                "Added peer with peer_id {} and address {} to kad routing table",
+                                peer, address
+                            );
+                            self.swarm
+                                .behaviour_mut()
+                                .kademlia
+                                .add_address(&peer, address.clone());
+
+                            // TODO dial in here as well?
+                            if let Err(e) = self.swarm.dial(address.clone()) {
+                                warn!(
+                                    "Dial in failed for peer_id {} at address {} with error :{}",
+                                    peer, address, e
+                                );
+                            }
+                        }
+                    }
+                    MdnsEvent::Expired(nodes) => {}
+                }
             }
             // KademliaStoreInserts is set to FilterBoth so that we can
             // validate AddProvider request from a peer that indicates an exchange
@@ -541,8 +544,6 @@ impl Network {
                     if record.num_remaining == 0 {
                         if let Some(sender) = self.pending_bootstrap_requests.remove(&id) {
                             sender.send(Ok(()));
-                        } else {
-                            emit_response_channel_missing(&id);
                         }
                     }
                 }
@@ -558,9 +559,7 @@ impl Network {
 
                         if num_remaining.is_none() || num_remaining.unwrap() == 0 {
                             if let Some(sender) = self.pending_bootstrap_requests.remove(&id) {
-                                sender.send(Err(err.into()));
-                            } else {
-                                emit_response_channel_missing(&id);
+                                sender.send(Err(anyhow::Error::from(err)));
                             }
                         }
                     }
@@ -756,9 +755,9 @@ impl Network {
     }
 }
 
-async fn emit_event(sender: &channel::Sender<NetworkEvent>, event: NetworkEvent) {
-    if sender.send(event).await.is_err() {
-        error!("Network evnent failed: Network event receiver dropped");
+async fn emit_event(sender: &broadcast::Sender<NetworkEvent>, event: NetworkEvent) {
+    if sender.send(event).is_err() {
+        error!("Network evnent failed: Network event receiver dropped <>");
     }
 }
 
@@ -817,11 +816,9 @@ pub enum Command {
     },
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum NetworkEvent {
-    Mdns(MdnsEvent),
     GossipsubMessageRecv(GossipsubMessage),
-    GossipsubMessageRecvErr(Box<dyn Error + Send>),
     DseMessageRequestRecv {
         sender_peer_id: PeerId,
         request_id: request_response::RequestId,

@@ -3,6 +3,8 @@ use ethers::{
     utils::keccak256,
 };
 use libp2p::{Multiaddr, PeerId};
+use log::debug;
+use log::error;
 use rand::Rng;
 use serde::{Deserialize, Serialize};
 use sled::{Config, Db};
@@ -60,7 +62,7 @@ impl Query {
             .network_details()
             .await
             .map(|(requester_id, requester_addr)| Query {
-                id,
+                id: 1, // FIXME: this is just for debugging
                 data,
                 requester_id,
                 requester_addr,
@@ -170,6 +172,10 @@ impl Trade {
     }
 
     pub fn update_status(&mut self, to: TradeStatus) {
+        debug!(
+            "Updated trade status for query_id {} from {:?} to {:?}",
+            self.query_id, self.status, to
+        );
         self.status = to;
     }
 
@@ -323,6 +329,10 @@ impl Storage {
     /// Adds new trade for a query and a bid
     ///
     /// Call after requester accepts the bid
+    ///
+    /// FIXME: Having query id as key for trade, restricts
+    /// having one trade per query. Not a restriction that
+    /// is needed.
     pub fn add_new_trade(&self, query: Query, bid: Bid, is_requester: bool) {
         let db = self.db.lock().unwrap();
         let trades = db
@@ -527,7 +537,7 @@ impl Storage {
             )
     }
 
-    // Find trade by query id & provider id & requester id
+    /// Find trade by query id & provider id & requester id
     pub fn find_active_trade(
         &self,
         query_id: &QueryId,

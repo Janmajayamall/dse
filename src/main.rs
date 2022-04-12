@@ -14,7 +14,6 @@ mod network;
 mod network_client;
 mod server;
 mod storage;
-mod subscription;
 
 #[derive(Debug, StructOpt)]
 #[structopt(name = "DSE args")]
@@ -65,6 +64,8 @@ async fn main() {
         }
     };
 
+    debug!("Node peer_id {}", keypair.public().to_peer_id());
+
     let bootstrap_peers = {
         if let Some((peer_id, addr)) = opt
             .boot_addr
@@ -76,7 +77,13 @@ async fn main() {
         }
     };
 
-    let network = network::Network::new(keypair.clone(), bootstrap_peers)
+    let listen_on: Multiaddr = match opt.listen_on {
+        Some(addr) => addr,
+        None => "/ip4/0.0.0.0/tcp/0"
+            .parse()
+            .expect("Default listen on addr parse errored"),
+    };
+    let network = network::Network::new(keypair.clone(), bootstrap_peers, listen_on)
         .await
         .expect("Network startup failed!");
 
@@ -104,22 +111,24 @@ async fn main() {
     );
 
     tokio::spawn(async {
-        indexer.run().await;
-    });
-
-    tokio::spawn(async {
         server.start().await;
     });
 
-    let waiter = network.network_event_receiver();
+    let mut waiter = network.network_event_receiver();
     tokio::spawn(async {
         network.run().await;
+    });
+
+    tokio::spawn(async {
+        indexer.run().await;
     });
 
     // FIXME: replace this with waiting for ctrl+c
     loop {
         select! {
-            _ = waiter.recv() => {}
+            e = waiter.recv() => {
+
+            }
         }
     }
 }

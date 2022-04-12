@@ -207,6 +207,8 @@ async fn handle_post(
                         {
                             Ok(network::DseMessageResponse::Ack) => {
                                 {
+                                    debug!("Placed bid for query id {}", query.id);
+
                                     // store bid
                                     server.storage.add_bid_sent_for_query(bid, query);
 
@@ -227,15 +229,15 @@ async fn handle_post(
             provider_id,
         } => {
             // Check that bid was received by the node (i.e. Requester)
-            if let Ok((query, bid)) = server
+            if let Ok(Ok((query, bid))) = server
                 .storage
                 .find_bid_received(&query_id, &provider_id)
-                .and_then(|bid| {
+                .map(|bid| {
                     // Find query sent for which the bid was receiveds
                     server
                         .storage
                         .find_query_sent_by_query_id(&query_id)
-                        .and_then(|query| Ok((query, bid)))
+                        .map(|query| (query, bid))
                 })
             {
                 match server
@@ -247,7 +249,10 @@ async fn handle_post(
                     .await
                 {
                     Ok(network::DseMessageResponse::Ack) => {
-                        // Requester does not P
+                        debug!(
+                            "Accepted bid from provider_id {} for query id {}",
+                            provider_id, query.id
+                        );
                         server.storage.add_new_trade(query, bid, true);
                         Ok(Box::new(http::StatusCode::OK))
                     }
@@ -291,6 +296,8 @@ async fn handle_post(
                     .await
                 {
                     Ok(network::DseMessageResponse::Ack) => {
+                        debug!("Sent StartCommit to requester for query_id {}", query_id);
+
                         // update trade status to WaitingRT1Commit
                         trade.update_status(storage::TradeStatus::WaitingRT1Commit);
                         server.storage.update_active_trade(trade);

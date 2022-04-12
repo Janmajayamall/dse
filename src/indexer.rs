@@ -1,11 +1,9 @@
 use async_std::channel;
-use libp2p::{identity::Keypair, request_response::RequestId, Multiaddr, PeerId};
+use libp2p::{identity::Keypair, request_response::RequestId};
 use log::{debug, error, info};
-use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{broadcast, mpsc};
 use tokio::{select, time};
 
 use crate::storage::QueryId;
@@ -22,17 +20,19 @@ pub struct Indexer {
     keypair: Keypair,
     /// Sends events to server clients over websocket
     server_client_senders: HashMap<usize, mpsc::UnboundedSender<server::SendWssMessage>>,
+
     /// network client
     network_client: network_client::Client,
-    network_event_receiver: channel::Receiver<network::NetworkEvent>,
+    network_event_receiver: broadcast::Receiver<network::NetworkEvent>,
+
     /// global database
     storage: Arc<storage::Storage>,
     ethnode: ethnode::EthNode,
 
     // receiver of commit procedure events
-    commit_proc_event_receiver: channel::Receiver<commit_procedure::CommitProcedureEvent>,
+    commit_proc_event_receiver: mpsc::Receiver<commit_procedure::CommitProcedureEvent>,
     // sender for commit procedure events
-    commit_proc_event_sender: channel::Sender<commit_procedure::CommitProcedureEvent>,
+    commit_proc_event_sender: mpsc::Sender<commit_procedure::CommitProcedureEvent>,
 
     // query ids of trades in send status currently
     // with active send() CommitProcedure
@@ -43,11 +43,12 @@ impl Indexer {
     pub fn new(
         keypair: Keypair,
         network_client: network_client::Client,
-        network_event_receiver: channel::Receiver<network::NetworkEvent>,
+        network_event_receiver: broadcast::Receiver<network::NetworkEvent>,
         storage: Arc<storage::Storage>,
         ethnode: ethnode::EthNode,
     ) -> Self {
-        let (commit_proc_event_sender, commit_proc_event_receiver) = channel::unbounded();
+        let (commit_proc_event_sender, commit_proc_event_receiver) =
+            mpsc::channel::<commit_procedure::CommitProcedureEvent>(20);
 
         Self {
             keypair,
@@ -91,10 +92,13 @@ impl Indexer {
                                 proc.send().await;
                             });
                         }
+
+                        // TODO: Send WS message to clients if trade status
+                        // is PFulfill Service
                     }
 
                 },
-                Ok(event) = self.commit_proc_event_receiver.recv() => {
+                Some(event) = self.commit_proc_event_receiver.recv() => {
                     use commit_procedure::CommitProcedureEvent;
                     match event {
                         CommitProcedureEvent::SendSuccess{ query_id } => {
@@ -112,8 +116,13 @@ impl Indexer {
     pub async fn handle_network_event(&self, event: network::NetworkEvent) {
         use network::{DseMessageRequest, DseMessageResponse, GossipsubMessage, NetworkEvent};
         use storage::TradeStatus;
+
         match event {
             NetworkEvent::GossipsubMessageRecv(GossipsubMessage::NewQuery(query)) => {
+                debug!(
+                    "Received new query with id {} from requester_id {}",
+                    query.id, query.requester_id
+                );
                 self.storage.add_query_received(query);
                 // TODO inform client over WSS
             }
@@ -140,6 +149,11 @@ impl Indexer {
                                 }
                             })
                         {
+                            debug!(
+                                "PlaceBid request received for query_id {} from provider_id {}",
+                                query_id, bid.provider_id
+                            );
+
                             self.storage.add_bid_received_for_query(&query_id, bid);
                             send_dse_response(
                                 request_id,
@@ -177,6 +191,11 @@ impl Indexer {
                                     })
                             })
                         {
+                            debug!(
+                                "AcceptBid request received for query_id {} from requester_id {}",
+                                query_id, sender_peer_id
+                            );
+
                             // is_requester = false, since node is provider
                             self.storage.add_new_trade(query, bid, false);
 
@@ -199,7 +218,7 @@ impl Indexer {
                     DseMessageRequest::StartCommit { query_id } => {
                         // Received StartCommit from Provider for AcceptedBid on a published
                         // Query by the Node (i.e. Requester). Thus, Trade object should exist
-                        // for the given query id with provider id as peer id.
+                        // for the given query id with provider id as sender id.
                         if let Ok(mut trade) = self
                             .storage
                             .find_active_trade(
@@ -216,6 +235,11 @@ impl Indexer {
                                 }
                             })
                         {
+                            debug!(
+                                "StartCommit request received for query_id {} from provider_id {}",
+                                query_id, sender_peer_id
+                            );
+
                             // update waiting status to RSendT1Commit
                             trade.update_status(TradeStatus::RSendT1Commit);
                             self.storage.update_active_trade(trade);
@@ -249,10 +273,15 @@ impl Indexer {
                                 if trade.status == TradeStatus::WaitingRT1Commit {
                                     Ok(trade)
                                 } else {
-                                    Err(anyhow::anyhow!("Invlaid request"))
+                                    Err(anyhow::anyhow!("Invalid request"))
                                 }
                             })
                         {
+                            debug!(
+                                "T1RequesterCommit request received for query_id {} from requester_id {}",
+                                query_id, sender_peer_id
+                            );
+
                             // In verify fn of commit procedure
                             // trade status is immediately changed to suitable
                             // processing status, thus preventing calling of this
@@ -300,6 +329,11 @@ impl Indexer {
                                 }
                             })
                         {
+                            debug!(
+                                "T1ProviderCommit request received for query_id {} from provider_id {}",
+                                query_id, sender_peer_id
+                            );
+
                             let proc = commit_procedure::CommitProcedure::new(
                                 self.storage.clone(),
                                 trade,
@@ -342,6 +376,11 @@ impl Indexer {
                                 }
                             })
                         {
+                            debug!(
+                                "T2RequesterCommit request received for query_id {} from requester_id {}",
+                                query_id, sender_peer_id
+                            );
+
                             let proc = commit_procedure::CommitProcedure::new(
                                 self.storage.clone(),
                                 trade,

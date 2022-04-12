@@ -156,6 +156,7 @@ impl Indexer {
                             })
                         {
                             // TODO prepare for t2 commits
+                            todo!();
                         } else {
                             // TODO send bad response
                         }
@@ -180,6 +181,7 @@ impl Indexer {
                             })
                         {
                             // TODO check that commit indexes valid and then update the state to PSendT1Commit
+                            todo!();
                         } else {
                             // TODO send bad resoponse or can even send expected value
                         }
@@ -203,6 +205,7 @@ impl Indexer {
                             })
                         {
                             // TODO check that commit indexes valid and then update the state to RSendT2Commit
+                            todo!();
                         } else {
                             // TODO send bad resoponse or can even send expected value
                         }
@@ -225,6 +228,7 @@ impl Indexer {
                             })
                         {
                             // TODO check that commit indexes valid and then update the state to RSendT2Commit
+                            todo!();
                         } else {
                             // TODO send bad resoponse or can even send expected value
                         }

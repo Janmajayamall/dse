@@ -159,6 +159,7 @@ async fn handle_post(
             // FIXME: Switch to chaining
             match storage::Query::from_data(
                 query,
+                server.keypair.public().to_peer_id(),
                 server.network_client.clone(),
                 server.ethnode.timelocked_wallet,
             )

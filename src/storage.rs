@@ -5,10 +5,12 @@ use ethers::{
 use libp2p::{Multiaddr, PeerId};
 use serde::{Deserialize, Serialize};
 use sled::{Config, Db};
-use std::collections::HashMap;
-use std::sync::{
-    atomic::{AtomicUsize, Ordering},
-    Arc, Mutex,
+use std::{
+    sync::{
+        atomic::{AtomicUsize, Ordering},
+        Mutex,
+    },
+    time::SystemTime,
 };
 
 pub type QueryId = u32;
@@ -34,20 +36,31 @@ pub struct Query {
 impl Query {
     pub async fn from_data(
         data: QueryData,
+        node_id: PeerId,
         mut network_client: network_client::Client,
         wallet_address: Address,
     ) -> anyhow::Result<Self> {
+        // id = keccack256({node_id}+{UNIX time in secs})[32 bits]
+        let mut id = node_id.to_bytes();
+        id.append(
+            &mut SystemTime::now()
+                .duration_since(SystemTime::UNIX_EPOCH)?
+                .as_secs()
+                .to_le_bytes()
+                .to_vec(),
+        );
+        let id = ethers::utils::keccak256(&id);
+        let id = u32::from_be_bytes(id[..4].try_into().unwrap());
+
         network_client
             .network_details()
             .await
-            .and_then(|(requester_id, requester_addr)| {
-                Ok(Query {
-                    id: Default::default(),
-                    data,
-                    requester_id,
-                    requester_addr,
-                    requester_wallet_address: wallet_address,
-                })
+            .map(|(requester_id, requester_addr)| Query {
+                id,
+                data,
+                requester_id,
+                requester_addr,
+                requester_wallet_address: wallet_address,
             })
     }
 }
@@ -76,26 +89,17 @@ impl Bid {
         network_client
             .network_details()
             .await
-            .and_then(|(provider_id, provider_addr)| {
-                Ok(Bid {
-                    query_id: data.query_id,
-                    provider_id,
-                    provider_addr,
-                    charge: data.charge,
-                    provider_wallet_address: wallet_address,
-                })
+            .map(|(provider_id, provider_addr)| Bid {
+                query_id: data.query_id,
+                provider_id,
+                provider_addr,
+                charge: data.charge,
+                provider_wallet_address: wallet_address,
             })
     }
 }
 
 #[derive(Deserialize, Serialize, Debug, PartialEq, Clone)]
-// P = BidAccepted
-// R = Waiting Start Commit
-// P = Waiting T1 Commit
-// R = Waitinf P's T1 Commit
-// P = Waiting T2 commit
-// R = Waiting Service
-// P = Waiting Invalidating Singauture
 pub enum TradeStatus {
     /// Provider should send StartCommit
     PSendStartCommit,
@@ -273,7 +277,7 @@ pub struct Storage {
 
 impl Storage {
     pub fn new(node_id: PeerId) -> Self {
-        let path = "./dbs/".to_string();
+        let mut path = "./dbs/".to_string();
         path.push_str(&node_id.to_base58());
         let config = Config::new().path(path);
 
@@ -340,12 +344,12 @@ impl Storage {
     ///
     /// Call after requester accepts the bid
     pub fn add_new_trade(&self, query: Query, bid: Bid, is_requester: bool) {
-        let mut db = self.db.lock().unwrap();
+        let db = self.db.lock().unwrap();
         let trades = db
             .open_tree(ACTIVE_TRADES)
             .expect("db: failed to open tree");
         let trade = Trade {
-            query,
+            query: query.clone(),
             bid,
             status: if is_requester {
                 TradeStatus::WaitingStartCommit
@@ -374,8 +378,9 @@ impl Storage {
                 .insert(
                     trade.query_id.to_be_bytes(),
                     bincode::serialize(&trade).unwrap(),
-                );
-            Ok(())
+                )
+                .map(|_| ())
+                .map_err(anyhow::Error::from)
         })
     }
 
@@ -459,8 +464,8 @@ impl Storage {
         queries
             .iter()
             .find(|res| {
-                if let Ok((id, val)) = *res {
-                    id == query_id.to_be_bytes()
+                if let Ok((id, val)) = res {
+                    *id == query_id.to_be_bytes()
                 } else {
                     false
                 }
@@ -480,8 +485,8 @@ impl Storage {
         queries
             .iter()
             .find(|res| {
-                if let Ok((id, val)) = *res {
-                    id == query_id.to_be_bytes()
+                if let Ok((id, val)) = res {
+                    *id == query_id.to_be_bytes()
                 } else {
                     false
                 }
@@ -498,8 +503,8 @@ impl Storage {
         let bids = db.open_tree(BIDS_SENT).expect("db: failed to open tree");
         bids.iter()
             .find(|res| {
-                if let Ok((id, val)) = *res {
-                    id == query_id.to_be_bytes()
+                if let Ok((id, val)) = res {
+                    *id == query_id.to_be_bytes()
                 } else {
                     false
                 }
@@ -516,21 +521,20 @@ impl Storage {
         query_id: &QueryId,
         provider_id: &PeerId,
     ) -> anyhow::Result<Bid> {
-        let mut db = self.db.lock().unwrap();
+        let db = self.db.lock().unwrap();
         let bids = db
             .open_tree(BIDS_RECEIVED)
             .expect("db: failed to open tree");
         bids.iter()
             .find(|val| {
-                if let Ok(flag) = val
-                    .map_err(|e| anyhow::Error::from(e))
-                    .and_then(|(id, bid)| {
-                        bincode::deserialize::<Bid>(&bid)
-                            .map_err(|e| anyhow::Error::from(e))
-                            .and_then(|bid| {
-                                Ok(bid.query_id == *query_id && bid.provider_id == *provider_id)
+                if let Ok(Ok(flag)) =
+                    val.to_owned()
+                        .map_err(|e| anyhow::Error::from(e))
+                        .map(|(_, bid)| {
+                            bincode::deserialize::<Bid>(&bid).map(|bid| {
+                                bid.query_id == *query_id && bid.provider_id == *provider_id
                             })
-                    })
+                        })
                 {
                     flag
                 } else {
@@ -557,18 +561,13 @@ impl Storage {
         trades
             .iter()
             .find(|res| {
-                if let Ok(flag) = res
-                    .map_err(|e| anyhow::Error::from(e))
-                    .and_then(|(id, val)| {
-                        bincode::deserialize::<Trade>(&val)
-                            .and_then(|trade| {
-                                Ok(trade.query_id == *query_id
-                                    && trade.bid.provider_id == *provider_id
-                                    && trade.query.requester_id == *requester_id)
-                            })
-                            .map_err(|e| anyhow::Error::from(e))
+                if let Ok(Ok(flag)) = res.to_owned().map(|(_, val)| {
+                    bincode::deserialize::<Trade>(&val).map(|trade| {
+                        trade.query_id == *query_id
+                            && trade.bid.provider_id == *provider_id
+                            && trade.query.requester_id == *requester_id
                     })
-                {
+                }) {
                     flag
                 } else {
                     false

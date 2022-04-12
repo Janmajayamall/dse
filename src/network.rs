@@ -612,7 +612,7 @@ impl Network {
                         emit_event(
                             &self.network_event_sender,
                             NetworkEvent::DseMessageRequestRecv {
-                                peer_id: peer,
+                                sender_peer_id: peer,
                                 request_id,
                                 request,
                             },
@@ -823,7 +823,7 @@ pub enum NetworkEvent {
     GossipsubMessageRecv(GossipsubMessage),
     GossipsubMessageRecvErr(Box<dyn Error + Send>),
     DseMessageRequestRecv {
-        peer_id: PeerId,
+        sender_peer_id: PeerId,
         request_id: request_response::RequestId,
         request: DseMessageRequest,
     },
@@ -906,7 +906,7 @@ pub enum DseMessageRequest {
     /// wallet address is suitable for exchange
     T1RequesterCommit {
         query_id: storage::QueryId,
-        commit: String,
+        commit: storage::Commit,
     },
     /// Provider sends T1 commitment to Requester
     ///
@@ -914,7 +914,7 @@ pub enum DseMessageRequest {
     /// commitment is valid
     T1ProviderCommit {
         query_id: storage::QueryId,
-        commit: String,
+        commit: storage::Commit,
     },
     /// Requester sends T2 commitment to Provider
     ///
@@ -922,7 +922,7 @@ pub enum DseMessageRequest {
     /// commitment is valid
     T2RequesterCommit {
         query_id: storage::QueryId,
-        commit: String,
+        commit: storage::Commit,
     },
     /// Provider sends acknowledgement to Requester
     /// that T2 commit is valid

@@ -3,6 +3,7 @@ use ethers::{
     utils::keccak256,
 };
 use libp2p::{Multiaddr, PeerId};
+use rand::Rng;
 use serde::{Deserialize, Serialize};
 use sled::{Config, Db};
 use std::{
@@ -41,16 +42,19 @@ impl Query {
         wallet_address: Address,
     ) -> anyhow::Result<Self> {
         // id = keccack256({node_id}+{UNIX time in secs})[32 bits]
-        let mut id = node_id.to_bytes();
-        id.append(
-            &mut SystemTime::now()
-                .duration_since(SystemTime::UNIX_EPOCH)?
-                .as_secs()
-                .to_le_bytes()
-                .to_vec(),
-        );
-        let id = ethers::utils::keccak256(&id);
-        let id = u32::from_be_bytes(id[..4].try_into().unwrap());
+        // let mut id = node_id.to_bytes();
+        // id.append(
+        //     &mut SystemTime::now()
+        //         .duration_since(SystemTime::UNIX_EPOCH)?
+        //         .as_secs()
+        //         .to_le_bytes()
+        //         .to_vec(),
+        // );
+        // let id = ethers::utils::keccak256(&id);
+        // let id = u32::from_be_bytes(id[..4].try_into().unwrap());
+        //
+        // OR just random
+        let id = rand::thread_rng().gen::<u32>();
 
         network_client
             .network_details()
@@ -111,16 +115,25 @@ pub enum TradeStatus {
     WaitingRT1Commit,
     /// Requester should send T1 commit
     RSendT1Commit,
+    /// Provider is processing Requester's T1
+    /// commit
+    ProcessingRT1Commit,
     /// Requester is waiting for Provider's T1
     /// Commit
     WaitingPT1Commit,
     /// Provider should send T1 commit
     PSendT1Commit,
+    /// Requester is processing Provider's T1
+    /// commit
+    ProcessingPT1Commit,
     /// Provider is waiting for Requester's T2
     /// Commit
     WaitingRT2Commit,
     /// Requester should send T2 commit
     RSendT2Commit,
+    /// Provider is processing Requester's T2
+    /// commit
+    ProcessingRT2Commit,
     /// Requester is waiting for Provider to
     /// fulfill the service
     WaitingForService,
@@ -156,41 +169,8 @@ impl Trade {
         self.bid.charge
     }
 
-    pub fn update_waiting_status(&mut self) {
-        match self.status {
-            TradeStatus::WaitingStartCommit => {
-                self.status = TradeStatus::RSendT1Commit;
-            }
-            TradeStatus::WaitingRT1Commit => {
-                self.status = TradeStatus::PSendT1Commit;
-            }
-            TradeStatus::WaitingPT1Commit => {
-                self.status = TradeStatus::RSendT2Commit;
-            }
-            TradeStatus::WaitingRT2Commit => {
-                self.status = TradeStatus::PFulfillService;
-            }
-            _ => {}
-        }
-    }
-
-    pub fn update_sending_status(&mut self) {
-        match self.status {
-            TradeStatus::PSendStartCommit => {
-                self.status = TradeStatus::WaitingRT1Commit;
-            }
-            TradeStatus::RSendT1Commit => {
-                self.status = TradeStatus::WaitingPT1Commit;
-            }
-
-            TradeStatus::PSendT1Commit => {
-                self.status = TradeStatus::WaitingRT2Commit;
-            }
-            TradeStatus::RSendT2Commit => {
-                self.status = TradeStatus::WaitingForService;
-            }
-            _ => {}
-        }
+    pub fn update_status(&mut self, to: TradeStatus) {
+        self.status = to;
     }
 
     pub fn is_sending_status(&self) -> bool {
@@ -202,7 +182,7 @@ impl Trade {
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
-enum CommitType {
+pub enum CommitType {
     /// Commitment Type 1
     T1 = 1,
     /// Commitment Type 2
@@ -212,22 +192,22 @@ enum CommitType {
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 pub struct Commit {
     /// index used for the commitment
-    index: u32,
+    pub index: u32,
     /// epoch during which the commitment is valid
-    epoch: u32,
+    pub epoch: u32,
     /// unique id that identifies commitment with the
     /// corresponding query id
-    u: u32,
+    pub u: u32,
     /// commit type 1 or 2
-    c_type: CommitType,
+    pub c_type: CommitType,
     /// address that invalidates the commitment
-    i_address: Address,
+    pub i_address: Address,
     /// address that can redeeem this commitment
     /// with invalidating signature.
     /// Only needed for c_type = 2
-    r_address: Address,
+    pub r_address: Address,
     /// owner's signature on commitment's blob
-    signature: Option<Signature>,
+    pub signature: Option<Signature>,
 }
 
 impl Commit {

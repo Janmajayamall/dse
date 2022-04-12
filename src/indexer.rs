@@ -1,18 +1,21 @@
 use async_std::channel;
-use libp2p::{identity::Keypair, request_response, Multiaddr, PeerId};
+use libp2p::{identity::Keypair, request_response::RequestId, Multiaddr, PeerId};
 use log::{debug, error, info};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use tokio::sync::{mpsc, oneshot};
 use tokio::{select, time};
 
+use crate::storage::QueryId;
+
+use super::commit_procedure;
+use super::ethnode;
 use super::network;
 use super::network_client;
 use super::server;
 use super::storage;
-
 /// Main interface thru which user interacts.
 /// That means sends and receives querues & bids.
 pub struct Indexer {
@@ -22,13 +25,18 @@ pub struct Indexer {
     /// network client
     network_client: network_client::Client,
     network_event_receiver: channel::Receiver<network::NetworkEvent>,
-
-    /// commitment client
-    // commitment_client: commitment::Client,
-    /// sent query counter
-    query_counter: AtomicUsize,
     /// global database
     storage: Arc<storage::Storage>,
+    ethnode: ethnode::EthNode,
+
+    // receiver of commit procedure events
+    commit_proc_event_receiver: channel::Receiver<commit_procedure::CommitProcedureEvent>,
+    // sender for commit procedure events
+    commit_proc_event_sender: channel::Sender<commit_procedure::CommitProcedureEvent>,
+
+    // query ids of trades in send status currently
+    // with active send() CommitProcedure
+    active_send_commit_proc: HashSet<QueryId>,
 }
 
 impl Indexer {
@@ -37,7 +45,10 @@ impl Indexer {
         network_client: network_client::Client,
         network_event_receiver: channel::Receiver<network::NetworkEvent>,
         storage: Arc<storage::Storage>,
+        ethnode: ethnode::EthNode,
     ) -> Self {
+        let (commit_proc_event_sender, commit_proc_event_receiver) = channel::unbounded();
+
         Self {
             keypair,
             server_client_senders: Default::default(),
@@ -45,8 +56,13 @@ impl Indexer {
             network_client,
             network_event_receiver,
 
-            query_counter: AtomicUsize::new(1),
             storage,
+            ethnode,
+
+            commit_proc_event_receiver,
+            commit_proc_event_sender,
+
+            active_send_commit_proc: Default::default(),
         }
     }
 
@@ -60,32 +76,41 @@ impl Indexer {
                 _ = interval.tick() => {
                     // get all active trades
                     for trade in self.storage.get_active_trades() {
-                        if trade.is_sending_status() {
-                            use storage::TradeStatus;
-                            use network::DseMessageRequest;
-                            match trade.status {
-                                // TradeStatus::PSendStartCommit => {
-                                //     // send start commit dse request
-                                //     let mut network_client = self.network_client.clone();
-                                //     let storage = self.storage.clone();
-                                //     tokio::spawn(async move {
-                                //         network_client.send_dse_message_request(trade.query.requester_id, DseMessageRequest::StartCommit{query_id: trade.query_id}).await;
-                                //     });
-                                // },
-                                _ => {
+                        if trade.is_sending_status() && !self.active_send_commit_proc.contains(&trade.query_id) {
+                            self.active_send_commit_proc.insert(trade.query_id);
 
-                                }
-                            }
+                            // start send() commit procedure
+                            let proc = commit_procedure::CommitProcedure::new(
+                                self.storage.clone(),
+                                trade,
+                                self.network_client.clone(),
+                                self.ethnode.clone(),
+                                self.commit_proc_event_sender.clone()
+                            );
+                            tokio::spawn(async move {
+                                proc.send().await;
+                            });
                         }
                     }
 
+                },
+                Ok(event) = self.commit_proc_event_receiver.recv() => {
+                    use commit_procedure::CommitProcedureEvent;
+                    match event {
+                        CommitProcedureEvent::SendSuccess{ query_id } => {
+                            self.active_send_commit_proc.remove(&query_id);
+                        },
+                        CommitProcedureEvent::SendFailed{ query_id } => {
+                            self.active_send_commit_proc.remove(&query_id);
+                        }
+                    };
                 }
             }
         }
     }
 
     pub async fn handle_network_event(&self, event: network::NetworkEvent) {
-        use network::{DseMessageRequest, GossipsubMessage, NetworkEvent};
+        use network::{DseMessageRequest, DseMessageResponse, GossipsubMessage, NetworkEvent};
         use storage::TradeStatus;
         match event {
             NetworkEvent::GossipsubMessageRecv(GossipsubMessage::NewQuery(query)) => {
@@ -93,7 +118,7 @@ impl Indexer {
                 // TODO inform client over WSS
             }
             NetworkEvent::DseMessageRequestRecv {
-                peer_id,
+                sender_peer_id,
                 request_id,
                 request,
             } => {
@@ -102,12 +127,33 @@ impl Indexer {
                         // Received PlaceBid request from Requester for placing a bid
                         // for a query. Therefore, first check whether node (i.e. Requester)
                         // sent a query with given query id.
-                        if let Ok(query) = self.storage.find_query_sent_by_query_id(&query_id) {
+                        if let Ok(_) = self
+                            .storage
+                            .find_query_sent_by_query_id(&query_id)
+                            .and_then(|q| {
+                                // provider_id should match sender_peer_id
+                                // from whom request was received
+                                if bid.provider_id == sender_peer_id {
+                                    Ok(q)
+                                } else {
+                                    Err(anyhow::anyhow!("Peer id mismatch"))
+                                }
+                            })
+                        {
                             self.storage.add_bid_received_for_query(&query_id, bid);
+                            send_dse_response(
+                                request_id,
+                                self.network_client.clone(),
+                                DseMessageResponse::Ack,
+                            );
 
                             // TODO inform the clients over WSS
                         } else {
-                            // TODO send bad response
+                            send_dse_response(
+                                request_id,
+                                self.network_client.clone(),
+                                DseMessageResponse::Bad,
+                            );
                         }
                     }
                     DseMessageRequest::AcceptBid { query_id } => {
@@ -121,18 +167,32 @@ impl Indexer {
                             .and_then(|bid| {
                                 self.storage
                                     .find_query_received_by_query_id(&query_id)
-                                    .and_then(|query| Ok((bid, query)))
+                                    .and_then(|query| {
+                                        // Check that sender is the requester of query
+                                        if query.requester_id == sender_peer_id {
+                                            Ok((bid, query))
+                                        } else {
+                                            Err(anyhow::anyhow!("Peer id mismatch"))
+                                        }
+                                    })
                             })
                         {
                             // is_requester = false, since node is provider
                             self.storage.add_new_trade(query, bid, false);
 
-                            // TODO validate and store requester's wallet address.
-                            // I think we should store wallet addresses of provider & requester
-                            // in the trade struct.
+                            send_dse_response(
+                                request_id,
+                                self.network_client.clone(),
+                                DseMessageResponse::Ack,
+                            );
 
                             // TODO inform clients over WSS
                         } else {
+                            send_dse_response(
+                                request_id,
+                                self.network_client.clone(),
+                                DseMessageResponse::Bad,
+                            );
                             // TODO send bad response
                         }
                     }
@@ -140,25 +200,37 @@ impl Indexer {
                         // Received StartCommit from Provider for AcceptedBid on a published
                         // Query by the Node (i.e. Requester). Thus, Trade object should exist
                         // for the given query id with provider id as peer id.
-                        if let Ok(trade) = self
+                        if let Ok(mut trade) = self
                             .storage
                             .find_active_trade(
                                 &query_id,
-                                &peer_id,
+                                // request sender should be the provider in the trade
+                                &sender_peer_id,
                                 &self.keypair.public().to_peer_id(),
                             )
                             .and_then(|trade| {
                                 if trade.status == TradeStatus::WaitingStartCommit {
                                     Ok(trade)
                                 } else {
-                                    Err(anyhow::anyhow!("Invlaid request"))
+                                    Err(anyhow::anyhow!("Invalid request"))
                                 }
                             })
                         {
-                            // TODO prepare for t2 commits
-                            todo!();
+                            // update waiting status to RSendT1Commit
+                            trade.update_status(TradeStatus::RSendT1Commit);
+                            self.storage.update_active_trade(trade);
+
+                            send_dse_response(
+                                request_id,
+                                self.network_client.clone(),
+                                DseMessageResponse::Ack,
+                            );
                         } else {
-                            // TODO send bad response
+                            send_dse_response(
+                                request_id,
+                                self.network_client.clone(),
+                                DseMessageResponse::Bad,
+                            );
                         }
                     }
                     DseMessageRequest::T1RequesterCommit { query_id, commit } => {
@@ -170,7 +242,8 @@ impl Indexer {
                             .find_active_trade(
                                 &query_id,
                                 &self.keypair.public().to_peer_id(),
-                                &peer_id,
+                                // requester sender should be requester in the trade
+                                &sender_peer_id,
                             )
                             .and_then(|trade| {
                                 if trade.status == TradeStatus::WaitingRT1Commit {
@@ -180,10 +253,32 @@ impl Indexer {
                                 }
                             })
                         {
-                            // TODO check that commit indexes valid and then update the state to PSendT1Commit
-                            todo!();
+                            // In verify fn of commit procedure
+                            // trade status is immediately changed to suitable
+                            // processing status, thus preventing calling of this
+                            // function twice.
+                            let proc = commit_procedure::CommitProcedure::new(
+                                self.storage.clone(),
+                                trade,
+                                self.network_client.clone(),
+                                self.ethnode.clone(),
+                                self.commit_proc_event_sender.clone(),
+                            );
+                            tokio::spawn(async move {
+                                proc.verify(commit).await;
+                            });
+
+                            send_dse_response(
+                                request_id,
+                                self.network_client.clone(),
+                                DseMessageResponse::Ack,
+                            );
                         } else {
-                            // TODO send bad resoponse or can even send expected value
+                            send_dse_response(
+                                request_id,
+                                self.network_client.clone(),
+                                DseMessageResponse::Bad,
+                            );
                         }
                     }
                     DseMessageRequest::T1ProviderCommit { query_id, commit } => {
@@ -193,7 +288,8 @@ impl Indexer {
                             .storage
                             .find_active_trade(
                                 &query_id,
-                                &peer_id,
+                                // request sender is provider
+                                &sender_peer_id,
                                 &self.keypair.public().to_peer_id(),
                             )
                             .and_then(|trade| {
@@ -204,10 +300,28 @@ impl Indexer {
                                 }
                             })
                         {
-                            // TODO check that commit indexes valid and then update the state to RSendT2Commit
-                            todo!();
+                            let proc = commit_procedure::CommitProcedure::new(
+                                self.storage.clone(),
+                                trade,
+                                self.network_client.clone(),
+                                self.ethnode.clone(),
+                                self.commit_proc_event_sender.clone(),
+                            );
+                            tokio::spawn(async move {
+                                proc.verify(commit).await;
+                            });
+
+                            send_dse_response(
+                                request_id,
+                                self.network_client.clone(),
+                                DseMessageResponse::Ack,
+                            );
                         } else {
-                            // TODO send bad resoponse or can even send expected value
+                            send_dse_response(
+                                request_id,
+                                self.network_client.clone(),
+                                DseMessageResponse::Bad,
+                            );
                         }
                     }
                     DseMessageRequest::T2RequesterCommit { query_id, commit } => {
@@ -216,8 +330,9 @@ impl Indexer {
                             .storage
                             .find_active_trade(
                                 &query_id,
-                                &peer_id,
                                 &self.keypair.public().to_peer_id(),
+                                // request sender should be requester
+                                &sender_peer_id,
                             )
                             .and_then(|trade| {
                                 if trade.status == TradeStatus::WaitingRT2Commit {
@@ -227,17 +342,46 @@ impl Indexer {
                                 }
                             })
                         {
-                            // TODO check that commit indexes valid and then update the state to RSendT2Commit
-                            todo!();
+                            let proc = commit_procedure::CommitProcedure::new(
+                                self.storage.clone(),
+                                trade,
+                                self.network_client.clone(),
+                                self.ethnode.clone(),
+                                self.commit_proc_event_sender.clone(),
+                            );
+                            tokio::spawn(async move {
+                                proc.verify(commit).await;
+                            });
+
+                            send_dse_response(
+                                request_id,
+                                self.network_client.clone(),
+                                DseMessageResponse::Ack,
+                            );
                         } else {
-                            // TODO send bad resoponse or can even send expected value
+                            send_dse_response(
+                                request_id,
+                                self.network_client.clone(),
+                                DseMessageResponse::Bad,
+                            );
                         }
                     }
-
                     _ => {}
                 }
             }
             _ => {}
         }
     }
+}
+
+fn send_dse_response(
+    request_id: RequestId,
+    mut network_client: network_client::Client,
+    response: network::DseMessageResponse,
+) {
+    tokio::spawn(async move {
+        let _ = network_client
+            .send_dse_message_response(request_id, response)
+            .await;
+    });
 }

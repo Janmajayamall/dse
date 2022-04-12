@@ -92,6 +92,7 @@ async fn main() {
         network_client.clone(),
         network.network_event_receiver(),
         storage.clone(),
+        ethnode.clone(),
     );
 
     let server = server::Server::new(

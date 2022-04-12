@@ -291,8 +291,8 @@ async fn handle_post(
                     .await
                 {
                     Ok(network::DseMessageResponse::Ack) => {
-                        // update trade status
-                        trade.update_sending_status();
+                        // update trade status to WaitingRT1Commit
+                        trade.update_status(storage::TradeStatus::WaitingRT1Commit);
                         server.storage.update_active_trade(trade);
 
                         Ok(Box::new(http::StatusCode::OK))

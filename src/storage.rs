@@ -262,8 +262,6 @@ const T1_COMMITS_RECEIVED: &[u8] = b"t1-commits-received";
 const T2_COMMITS_RECEIVED: &[u8] = b"t2-commits-received";
 
 pub struct Storage {
-    /// Keeps track of unused indexes
-    unused_indexes: u32,
     /// Stores all graphs
     ///
     /// Graphs include - AllTrades, ActiveTrades
@@ -274,10 +272,16 @@ pub struct Storage {
 }
 
 impl Storage {
-    // functions
-    // maintain DB for queries sent
-    // fn for adding new Trade
-    // fn for updating Trade status
+    pub fn new(node_id: PeerId) -> Self {
+        let path = "./dbs/".to_string();
+        path.push_str(&node_id.to_base58());
+        let config = Config::new().path(path);
+
+        Self {
+            db: Mutex::new(config.open().expect("Failed to open main db")),
+            client_id_counter: AtomicUsize::new(1),
+        }
+    }
 
     /// Adds newly received bid to query's
     /// bid tree

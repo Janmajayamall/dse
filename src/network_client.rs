@@ -15,6 +15,10 @@ pub struct Client {
 }
 
 impl Client {
+    pub fn new(command_sender: mpsc::Sender<Command>) -> Self {
+        Self { command_sender }
+    }
+
     pub async fn add_kad_peer(
         &mut self,
         peer_id: PeerId,

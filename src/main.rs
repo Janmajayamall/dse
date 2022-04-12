@@ -1,15 +1,11 @@
-use async_std::io::prelude::BufReadExt;
-use async_std::prelude::StreamExt;
-use async_std::{self};
-use libp2p::gossipsub::{self};
-use libp2p::kad::record::Key;
-use libp2p::kad::{Quorum, Record};
-use libp2p::mdns::MdnsEvent;
-use libp2p::{Multiaddr, PeerId};
+use async_std::sync::Arc;
+use libp2p::{
+    identity::{secp256k1, Keypair},
+    Multiaddr, PeerId,
+};
 use log::{debug, error, info};
-use std::error;
 use structopt::StructOpt;
-use tokio::{select, sync::mpsc};
+use tokio::select;
 
 mod commit_procedure;
 mod ethnode;
@@ -54,22 +50,75 @@ async fn main() {
 
     let opt = Opt::from_args();
 
-    let eth_node =
-        ethnode::EthNode::new(opt.eth_rpc_endpoint, opt.private_key, opt.wallet_address)?;
-    let (mut network_event_receiver, network_interface) =
-        network::new(opt.seed, network_c_receiver)
-            .await
-            .expect("network::new failed");
-    let database = database::new(network_interface.keypair.public().to_peer_id().to_base58());
-    let (indexer_event_receiver, indexer_interface) = indexer::new(
+    let keypair = {
+        match opt.seed {
+            Some(seed) => {
+                let mut bytes: [u8; 32] = [0; 32];
+                bytes[0] = seed;
+                Keypair::Secp256k1(
+                    secp256k1::SecretKey::from_bytes(bytes)
+                        .expect("Invalid keypair seed")
+                        .into(),
+                )
+            }
+            _ => Keypair::generate_secp256k1(),
+        }
+    };
+
+    let bootstrap_peers = {
+        if let Some((peer_id, addr)) = opt
+            .boot_addr
+            .and_then(|addr| opt.boot_id.and_then(|peer_id| Some((peer_id, addr))))
+        {
+            vec![(peer_id, addr)]
+        } else {
+            Vec::<(PeerId, Multiaddr)>::new()
+        }
+    };
+
+    let network = network::Network::new(keypair.clone(), bootstrap_peers)
+        .await
+        .expect("Network startup failed!");
+
+    let network_client = network_client::Client::new(network.network_command_sender());
+
+    let ethnode = ethnode::EthNode::new(opt.eth_rpc_endpoint, opt.private_key, opt.wallet_address)
+        .expect("EthNode failed to start");
+
+    let storage = Arc::new(storage::Storage::new(keypair.public().to_peer_id()));
+
+    let indexer = indexer::Indexer::new(
+        keypair.clone(),
         network_client.clone(),
-        commitment_client.clone(),
-        indexer_c_receiver,
-        database.clone(),
+        network.network_event_receiver(),
+        storage.clone(),
     );
-    let commitment_interface = commitment::new(
-        commitment_c_receiver,
+
+    let server = server::Server::new(
         network_client.clone(),
-        eth_node.clone(),
+        storage.clone(),
+        ethnode.clone(),
+        keypair.clone(),
+        opt.server_port,
     );
+
+    tokio::spawn(async {
+        indexer.run().await;
+    });
+
+    tokio::spawn(async {
+        server.start().await;
+    });
+
+    let waiter = network.network_event_receiver();
+    tokio::spawn(async {
+        network.run().await;
+    });
+
+    // FIXME: replace this with waiting for ctrl+c
+    loop {
+        select! {
+            _ = waiter.recv() => {}
+        }
+    }
 }

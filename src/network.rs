@@ -323,11 +323,11 @@ impl Network {
         }
     }
 
-    fn network_event_receiver(&self) -> channel::Receiver<NetworkEvent> {
+    pub fn network_event_receiver(&self) -> channel::Receiver<NetworkEvent> {
         self.network_event_receiver.clone()
     }
 
-    fn network_command_sender(&self) -> mpsc::Sender<Command> {
+    pub fn network_command_sender(&self) -> mpsc::Sender<Command> {
         self.command_sender.clone()
     }
 
@@ -981,7 +981,7 @@ impl RequestResponseCodec for DseMessageCodec {
 
     async fn read_response<T>(
         &mut self,
-        protocol: &Self::Protocol,
+        _: &Self::Protocol,
         io: &mut T,
     ) -> io::Result<Self::Response>
     where
@@ -996,7 +996,7 @@ impl RequestResponseCodec for DseMessageCodec {
 
     async fn write_request<T>(
         &mut self,
-        protocol: &Self::Protocol,
+        _: &Self::Protocol,
         io: &mut T,
         req: Self::Request,
     ) -> io::Result<()>

@@ -64,7 +64,7 @@ pub enum ReceivedMessage {
 }
 
 #[derive(Clone)]
-struct Server {
+pub struct Server {
     // id_counter: AtomicUsize,
     network_client: network_client::Client,
     storage: Arc<storage::Storage>,
@@ -73,6 +73,8 @@ struct Server {
 
     server_event_receiver: channel::Receiver<ServerEvent>,
     server_event_sender: channel::Sender<ServerEvent>,
+
+    port: u16,
 }
 
 impl Server {
@@ -81,6 +83,7 @@ impl Server {
         storage: Arc<storage::Storage>,
         ethnode: ethnode::EthNode,
         keypair: Keypair,
+        port: u16,
     ) -> Self {
         let (server_event_sender, server_event_receiver) = channel::unbounded();
         Self {
@@ -91,10 +94,12 @@ impl Server {
 
             server_event_receiver,
             server_event_sender,
+
+            port,
         }
     }
 
-    pub async fn start(&mut self, port: u16) {
+    pub async fn start(self) {
         let ws_main = warp::path("connect")
             .and(warp::ws())
             .and(with_server(self.clone()))
@@ -129,7 +134,7 @@ impl Server {
             .or(get_bids_of_query)
             .or(ws_main);
 
-        warp::serve(main).run(([127, 0, 0, 1], port)).await;
+        warp::serve(main).run(([127, 0, 0, 1], self.port)).await;
     }
 }
 

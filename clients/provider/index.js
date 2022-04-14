@@ -41,7 +41,7 @@ async function acceptBid(queryId, bidderId, port) {
 		body: JSON.stringify({
 			AcceptBid: {
 				query_id: queryId,
-				bidder_id: bidderId,
+				provider_id: bidderId,
 			},
 		}),
 		headers: { "Content-Type": "application/json" },
@@ -87,35 +87,35 @@ async function getQueryBids(queryId, port) {
 
 	const delay = 3;
 
-	// // requester sends query
-	// setTimeout(async () => {
-	// await sendQuery("yolo2", requesterPort);
-	// }, 0 * delay * 1000);
+	// requester sends query
+	setTimeout(async () => {
+		await sendQuery("yolo2", requesterPort);
+	}, 0 * delay * 1000);
 
-	// // provider receieves query
-	// setTimeout(async () => {
-	// await receivedQueries(providerPort);
-	// }, 1 * delay * 1000);
+	// provider receieves query
+	setTimeout(async () => {
+		await receivedQueries(providerPort);
+	}, 1 * delay * 1000);
 
-	// // provider places a bid to requester for query
-	// setTimeout(async () => {
-	await sendBid(queryId, requesterPeerId, providerPort);
-	// }, 2 * delay * 1000);
+	// provider places a bid to requester for query
+	setTimeout(async () => {
+		await sendBid(queryId, requesterPeerId, providerPort);
+	}, 2 * delay * 1000);
 
-	// // requester receives bid
-	// setTimeout(async () => {
-	// 	await getQueryBids(1, requesterPort);
-	// }, 3 * delay * 1000);
+	// requester receives bid
+	setTimeout(async () => {
+		await getQueryBids(1, requesterPort);
+	}, 3 * delay * 1000);
 
-	// // requester accepts the bid by provider
-	// setTimeout(async () => {
-	// 	await acceptBid(1, providerPeerId, requesterPort);
-	// }, 4 * delay * 1000);
+	// requester accepts the bid by provider
+	setTimeout(async () => {
+		await acceptBid(1, providerPeerId, requesterPort);
+	}, 4 * delay * 1000);
 
-	// // provider sends start commit to requester
-	// setTimeout(async () => {
-	// 	await startCommit(queryId, providerPort);
-	// }, 5 * delay * 1000);
+	// provider sends start commit to requester
+	setTimeout(async () => {
+		await startCommit(queryId, providerPort);
+	}, 5 * delay * 1000);
 })();
 
 // const socket = io(`${baseUrl}/connect`);

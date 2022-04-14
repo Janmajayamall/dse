@@ -2,6 +2,7 @@ use super::ethnode::EthNode;
 use super::network::DseMessageRequest;
 use super::network_client;
 use super::storage::{self, TradeStatus};
+use log::error;
 use std::sync::Arc;
 use tokio::sync::{broadcast, mpsc};
 use tokio::time;
@@ -52,7 +53,7 @@ impl CommitProcedure {
 
         // Perform commit procedure
         // Simulates verification
-        let mut interval = time::interval(time::Duration::from_secs(5));
+        let mut interval = time::interval(time::Duration::from_secs(10));
         interval.tick().await;
 
         // Update trade status suitable send status

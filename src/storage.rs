@@ -179,9 +179,11 @@ impl Trade {
         self.status = to;
     }
 
+    /// Returns true if trade status is SOMETHING
+    /// send that needs to be triggered automatically,
+    /// by indexer otherwise returns false.
     pub fn is_sending_status(&self) -> bool {
-        self.status == TradeStatus::PSendStartCommit
-            || self.status == TradeStatus::RSendT1Commit
+        self.status == TradeStatus::RSendT1Commit
             || self.status == TradeStatus::PSendT1Commit
             || self.status == TradeStatus::RSendT2Commit
     }
@@ -513,19 +515,14 @@ impl Storage {
     ) -> anyhow::Result<Bid> {
         let db = self.db.lock().unwrap();
         let bids = db
-            .open_tree(BIDS_RECEIVED)
+            .open_tree([BIDS_RECEIVED, &query_id.to_be_bytes()].concat())
             .expect("db: failed to open tree");
         bids.iter()
             .find(|val| {
-                if let Ok(Ok(flag)) =
-                    val.to_owned()
-                        .map_err(|e| anyhow::Error::from(e))
-                        .map(|(_, bid)| {
-                            bincode::deserialize::<Bid>(&bid).map(|bid| {
-                                bid.query_id == *query_id && bid.provider_id == *provider_id
-                            })
-                        })
-                {
+                if let Ok(Ok(flag)) = val.to_owned().map_err(anyhow::Error::from).map(|(_, bid)| {
+                    bincode::deserialize::<Bid>(&bid)
+                        .map(|bid| bid.query_id == *query_id && bid.provider_id == *provider_id)
+                }) {
                     flag
                 } else {
                     false

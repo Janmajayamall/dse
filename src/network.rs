@@ -757,7 +757,7 @@ impl Network {
 
 async fn emit_event(sender: &broadcast::Sender<NetworkEvent>, event: NetworkEvent) {
     if sender.send(event).is_err() {
-        error!("Network evnent failed: Network event receiver dropped <>");
+        error!("Network evnent failed: Network event receiver dropped");
     }
 }
 

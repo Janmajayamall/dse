@@ -168,10 +168,13 @@ async fn handle_post(
                 Ok(query) => {
                     match server
                         .network_client
-                        .publish_message(network::GossipsubMessage::NewQuery(query))
+                        .publish_message(network::GossipsubMessage::NewQuery(query.clone()))
                         .await
                     {
-                        Ok(_) => Ok(Box::new(http::StatusCode::OK)),
+                        Ok(_) => {
+                            server.storage.add_query_sent(query);
+                            Ok(Box::new(http::StatusCode::OK))
+                        }
                         Err(_) => Ok(Box::new(http::StatusCode::INTERNAL_SERVER_ERROR)),
                     }
                 }
@@ -180,6 +183,7 @@ async fn handle_post(
         }
         ReceivedMessage::PlaceBid { bid } => {
             // FIXME: Switch to chaining
+
             match storage::Bid::from_data(
                 bid,
                 server.network_client.clone(),
@@ -206,14 +210,12 @@ async fn handle_post(
                             .await
                         {
                             Ok(network::DseMessageResponse::Ack) => {
-                                {
-                                    debug!("Placed bid for query id {}", query.id);
+                                debug!("Placed bid for query id {}", query.id);
 
-                                    // store bid
-                                    server.storage.add_bid_sent_for_query(bid, query);
+                                // store bid
+                                server.storage.add_bid_sent_for_query(bid, query);
 
-                                    Ok(Box::new(http::StatusCode::OK))
-                                }
+                                Ok(Box::new(http::StatusCode::OK))
                             }
                             _ => Ok(Box::new(http::StatusCode::INTERNAL_SERVER_ERROR)),
                         }
@@ -256,6 +258,7 @@ async fn handle_post(
                         server.storage.add_new_trade(query, bid, true);
                         Ok(Box::new(http::StatusCode::OK))
                     }
+                    Err(_) => Ok(Box::new(http::StatusCode::INTERNAL_SERVER_ERROR)),
                     _ => Ok(Box::new(http::StatusCode::INTERNAL_SERVER_ERROR)),
                 }
             } else {

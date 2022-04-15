@@ -1,11 +1,11 @@
 use super::network::{self, Command};
 use anyhow::anyhow;
 use libp2p::kad::{
-    record, Addresses, BootstrapError, GetRecordError, GetRecordOk, Kademlia, KademliaConfig,
-    KademliaEvent, PutRecordOk, QueryId, QueryResult, Quorum, Record,
+    record, AddProviderOk, Addresses, BootstrapError, GetProvidersOk, GetRecordError, GetRecordOk,
+    Kademlia, KademliaConfig, KademliaEvent, PutRecordOk, QueryId, QueryResult, Quorum, Record,
 };
 use libp2p::{gossipsub, request_response, Multiaddr, NetworkBehaviour, PeerId, Transport};
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{broadcast, mpsc, oneshot};
 
 // client & event loop for network
 #[derive(Clone)]
@@ -86,6 +86,22 @@ impl Client {
         receiver.await?
     }
 
+    pub async fn dht_start_providing(&self, key: record::Key) -> anyhow::Result<AddProviderOk> {
+        let (sender, receiver) = oneshot::channel();
+        self.command_sender
+            .send(Command::DhtStartProviding { key, sender })
+            .await?;
+        receiver.await?
+    }
+
+    pub async fn dht_get_providers(&self, key: record::Key) -> anyhow::Result<GetProvidersOk> {
+        let (sender, receiver) = oneshot::channel();
+        self.command_sender
+            .send(Command::DhtGetProviders { key, sender })
+            .await?;
+        receiver.await?
+    }
+
     pub async fn kad_bootstrap(&mut self) -> anyhow::Result<()> {
         let (sender, receiver) = oneshot::channel();
         self.command_sender
@@ -143,5 +159,15 @@ impl Client {
             .send(Command::NetworkDetails { sender })
             .await?;
         receiver.await?
+    }
+
+    pub async fn subscribe_network_events(
+        &self,
+    ) -> Result<broadcast::Receiver<network::NetworkEvent>, anyhow::Error> {
+        let (sender, receiver) = oneshot::channel();
+        self.command_sender
+            .send(Command::SubscribeNetworkEvents { sender })
+            .await;
+        Ok(receiver.await?)
     }
 }

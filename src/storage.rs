@@ -23,8 +23,8 @@ use super::network_client;
 /// Commit history
 #[derive(Deserialize, Serialize, Debug, Clone)]
 pub struct CommitHistory {
-    /// Address that made these commits
-    of_address: Address,
+    /// Wallet address that made these commits
+    wallet_address: Address,
     /// All commits
     commits: Vec<Commit>,
 }
@@ -85,6 +85,8 @@ pub struct Query {
     pub data: QueryData,
     pub requester_addr: Multiaddr,
     pub requester_id: PeerId,
+    // FIXME: I don't think this is needed since
+    // Commit carries corresponding wallet address
     pub requester_wallet_address: Address,
 }
 
@@ -134,6 +136,8 @@ pub struct Bid {
     pub query_id: QueryId,
     pub provider_addr: Multiaddr,
     pub provider_id: PeerId,
+    // FIXME: I don't think this is needed since
+    // Commit carries corresponding wallet address
     pub provider_wallet_address: Address,
     pub charge: U256,
 }
@@ -271,6 +275,9 @@ pub struct Commit {
     /// with invalidating signature.
     /// Only needed for c_type = 2
     pub r_address: Address,
+    /// Wallet address to which this time-locked
+    /// commitment belongs
+    pub wallet_address: Address,
     /// owner's signature on commitment's blob
     pub signature: Option<Signature>,
     /// invalidting signature for the commit
@@ -416,14 +423,14 @@ impl Storage {
     }
 
     /// Adds new commit to the commit history
-    /// of other node (i.e. of_address)
-    pub fn add_new_commit_to_commit_history(&self, of_address: &Address, commit: Commit) {
+    /// of a wallet addess
+    pub fn add_new_commit_to_commit_history(&self, wallet_address: &Address, commit: Commit) {
         let mut existing_h = {
-            if let Some(h) = self.find_commit_history(of_address) {
+            if let Some(h) = self.find_commit_history(wallet_address) {
                 h
             } else {
                 CommitHistory {
-                    of_address: *of_address,
+                    wallet_address: *wallet_address,
                     commits: Default::default(),
                 }
             }
@@ -436,10 +443,7 @@ impl Storage {
         let commit_history = db
             .open_tree(COMMIT_HISTORY)
             .expect("db: failed to open tree")
-            .insert(
-                of_address.as_bytes(),
-                bincode::serialize(&existing_h).unwrap(),
-            );
+            .insert(wallet_address.as_bytes(), bincode::serialize(&existing_h).unwrap());
     }
 
     /// Updates Active Trade
@@ -520,8 +524,8 @@ impl Storage {
             .collect()
     }
 
-    /// Find commit history of `of_address`
-    pub fn find_commit_history(&self, of_address: &Address) -> Option<CommitHistory> {
+    /// Find commit history of `wallet_address`
+    pub fn find_commit_history(&self, wallet_address: &Address) -> Option<CommitHistory> {
         let mut db = self.db.lock().unwrap();
         db.open_tree(COMMIT_HISTORY)
             .expect("db: failed to open tree")
@@ -529,7 +533,7 @@ impl Storage {
             .find(|val| {
                 if let Ok(Ok(flag)) = val.map(|(_, cm)| {
                     bincode::deserialize::<CommitHistory>(&cm)
-                        .map(|cm| cm.of_address == *of_address)
+                        .map(|cm| cm.wallet_address == *wallet_address)
                 }) {
                     flag
                 } else {

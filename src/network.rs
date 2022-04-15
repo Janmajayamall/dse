@@ -15,8 +15,9 @@ use libp2p::identity::{secp256k1, Keypair};
 use libp2p::kad::record::store::MemoryStore;
 use libp2p::kad::record::Key;
 use libp2p::kad::{
-    Addresses, BootstrapError, GetRecordError, GetRecordOk, Kademlia, KademliaConfig,
-    KademliaEvent, KademliaStoreInserts, PutRecordOk, QueryId, QueryResult, Quorum, Record,
+    AddProviderOk, Addresses, BootstrapError, GetProvidersOk, GetRecordError, GetRecordOk,
+    Kademlia, KademliaConfig, KademliaEvent, KademliaStoreInserts, PutRecordOk, QueryId,
+    QueryResult, Quorum, Record,
 };
 use libp2p::mdns::{Mdns, MdnsConfig, MdnsEvent};
 use libp2p::mplex::MplexConfig;
@@ -184,7 +185,11 @@ pub struct Network {
     network_event_receiver: broadcast::Receiver<NetworkEvent>,
 
     pending_dht_put_requests: HashMap<QueryId, oneshot::Sender<Result<PutRecordOk, anyhow::Error>>>,
+    pending_dht_start_providing_requests:
+        HashMap<QueryId, oneshot::Sender<Result<AddProviderOk, anyhow::Error>>>,
     pending_dht_get_requests: HashMap<QueryId, oneshot::Sender<Result<GetRecordOk, anyhow::Error>>>,
+    pending_dht_get_providers_requests:
+        HashMap<QueryId, oneshot::Sender<Result<GetProvidersOk, anyhow::Error>>>,
     pending_add_peers: HashMap<PeerId, oneshot::Sender<Result<(), anyhow::Error>>>,
     pending_bootstrap_requests: HashMap<QueryId, oneshot::Sender<Result<(), anyhow::Error>>>,
     // Pending result of outbound request. It returns DseMessageResponse
@@ -268,7 +273,9 @@ impl Network {
             network_event_receiver,
 
             pending_dht_put_requests: Default::default(),
+            pending_dht_start_providing_requests: Default::default(),
             pending_dht_get_requests: Default::default(),
+            pending_dht_get_providers_requests: Default::default(),
             pending_add_peers: Default::default(),
             pending_bootstrap_requests: Default::default(),
             pending_dse_outbound_message_requests: Default::default(),
@@ -368,6 +375,18 @@ impl Network {
                     }
                 }
             }
+            Command::DhtStartProviding { key, sender } => {
+                match self.swarm.behaviour_mut().kademlia.start_providing(key) {
+                    Ok(query_id) => {
+                        self.pending_dht_start_providing_requests
+                            .insert(query_id, sender);
+                    }
+
+                    Err(e) => {
+                        sender.send(Err(e.into()));
+                    }
+                }
+            }
             Command::DhtGet {
                 key,
                 quorum,
@@ -375,6 +394,11 @@ impl Network {
             } => {
                 let query_id = self.swarm.behaviour_mut().kademlia.get_record(key, quorum);
                 self.pending_dht_get_requests.insert(query_id, sender);
+            }
+            Command::DhtGetProviders { key, sender } => {
+                let query_id = self.swarm.behaviour_mut().kademlia.get_providers(key);
+                self.pending_dht_get_providers_requests
+                    .insert(query_id, sender);
             }
             Command::Bootstrap { sender } => {
                 match self.swarm.behaviour_mut().kademlia.bootstrap() {
@@ -386,7 +410,6 @@ impl Network {
                     }
                 }
             }
-
             Command::PublishMessage { message, sender } => {
                 match self
                     .swarm
@@ -452,6 +475,9 @@ impl Network {
                     )));
                 }
             },
+            Command::SubscribeNetworkEvents { sender } => {
+                sender.send(self.network_event_receiver());
+            }
         }
     }
 
@@ -564,6 +590,48 @@ impl Network {
                         }
                     }
                 },
+                QueryResult::StartProviding(Ok(record)) => {
+                    debug!("kad: StartProviding for key {:?} success", record.key);
+
+                    if let Some(sender) = self.pending_dht_start_providing_requests.remove(&id) {
+                        sender.send(Ok(record));
+                    } else {
+                        emit_response_channel_missing(&id);
+                    }
+                }
+                QueryResult::StartProviding(Err(err)) => {
+                    error!(
+                        "kad: StartProviding for key {:?} errored with timeout",
+                        err.key()
+                    );
+
+                    if let Some(sender) = self.pending_dht_start_providing_requests.remove(&id) {
+                        sender.send(Err(err.into()));
+                    } else {
+                        emit_response_channel_missing(&id);
+                    }
+                }
+                QueryResult::GetProviders(Ok(record)) => {
+                    debug!("kad: GetProviders for key {:?} success", record.key);
+
+                    if let Some(sender) = self.pending_dht_get_providers_requests.remove(&id) {
+                        sender.send(Ok(record));
+                    } else {
+                        emit_response_channel_missing(&id);
+                    }
+                }
+                QueryResult::GetProviders(Err(err)) => {
+                    error!(
+                        "kad: GetProviders for key {:?} errored with timeout",
+                        err.key()
+                    );
+
+                    if let Some(sender) = self.pending_dht_get_providers_requests.remove(&id) {
+                        sender.send(Err(err.into()));
+                    } else {
+                        emit_response_channel_missing(&id);
+                    }
+                }
                 _ => return,
             },
             SwarmEvent::Behaviour(BehaviourEvent::Kademlia(KademliaEvent::RoutingUpdated {
@@ -789,10 +857,18 @@ pub enum Command {
         quorum: Quorum,
         sender: oneshot::Sender<Result<PutRecordOk, anyhow::Error>>,
     },
+    DhtStartProviding {
+        key: Key,
+        sender: oneshot::Sender<Result<AddProviderOk, anyhow::Error>>,
+    },
     DhtGet {
         key: Key,
         quorum: Quorum,
         sender: oneshot::Sender<Result<GetRecordOk, anyhow::Error>>,
+    },
+    DhtGetProviders {
+        key: Key,
+        sender: oneshot::Sender<Result<GetProvidersOk, anyhow::Error>>,
     },
     Bootstrap {
         sender: oneshot::Sender<Result<(), anyhow::Error>>,
@@ -813,6 +889,9 @@ pub enum Command {
     },
     NetworkDetails {
         sender: oneshot::Sender<Result<(PeerId, Multiaddr), anyhow::Error>>,
+    },
+    SubscribeNetworkEvents {
+        sender: oneshot::Sender<broadcast::Receiver<NetworkEvent>>,
     },
 }
 
@@ -882,6 +961,18 @@ impl GossipsubTopic {
     }
 }
 
+#[derive(Deserialize, Serialize, Debug, Clone, PartialEq)]
+pub enum CommitHistoryRequest {
+    WantHistory {
+        wallet_address: ethers::types::Address,
+    },
+    Update {
+        wallet_address: ethers::types::Address,
+        commits: Vec<storage::Commit>,
+        last_batch: bool,
+    },
+}
+
 // All stuff related to request response
 #[derive(Deserialize, Serialize, Debug, Clone, PartialEq)]
 pub enum DseMessageRequest {
@@ -933,6 +1024,12 @@ pub enum DseMessageRequest {
         query_id: storage::QueryId,
         invalidating_signature: ethers::types::Signature,
     },
+
+    /// Load Commit History Reqests
+    ///
+    /// FIXME: Sometime later implement different RR
+    /// protocols for DSE requests and LoadCommit requests
+    CommitHistory(CommitHistoryRequest),
 }
 
 #[derive(Deserialize, Serialize, Debug, Clone, PartialEq)]
@@ -969,7 +1066,7 @@ impl RequestResponseCodec for DseMessageCodec {
     where
         T: AsyncRead + Unpin + Send,
     {
-        let vec = read_length_prefixed(io, 10000000).await?;
+        let vec = read_length_prefixed(io, 1000000).await?;
         match serde_json::from_slice(&vec) {
             Ok(v) => Ok(v),
             Err(e) => Err(io::ErrorKind::Other.into()),
@@ -984,7 +1081,7 @@ impl RequestResponseCodec for DseMessageCodec {
     where
         T: AsyncRead + Unpin + Send,
     {
-        let vec = read_length_prefixed(io, 10000000).await?;
+        let vec = read_length_prefixed(io, 1000000).await?;
         match serde_json::from_slice(&vec) {
             Ok(v) => Ok(v),
             Err(_) => Err(io::ErrorKind::Other.into()),

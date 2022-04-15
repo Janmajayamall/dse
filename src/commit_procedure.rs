@@ -48,7 +48,7 @@ impl CommitProcedure {
         // the status.
 
         // If node does not have commit history for the other node
-        // then request it 
+        // then request it
 
         // update trade status to suitable processing status
         self.update_trade_processing_status();
@@ -121,13 +121,15 @@ impl CommitProcedure {
             _ => {}
         };
         Some(storage::Commit {
-            index: 0,
+            indexes: Default::default(),
             epoch: 0,
             u: 0,
             c_type: storage::CommitType::T1,
             i_address: Default::default(),
             r_address: Default::default(),
             signature: None,
+            invalidating_signature: None,
+            wallet_address: Default::default(),
         })
     }
 

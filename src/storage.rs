@@ -24,9 +24,9 @@ use super::network_client;
 #[derive(Deserialize, Serialize, Debug, Clone)]
 pub struct CommitHistory {
     /// Wallet address that made these commits
-    wallet_address: Address,
+    pub wallet_address: Address,
     /// All commits
-    commits: Vec<Commit>,
+    pub commits: Vec<Commit>,
 }
 
 impl CommitHistory {
@@ -67,8 +67,8 @@ impl CommitHistory {
         });
     }
 
-    pub fn add_new_commit(&mut self, commit: Commit) {
-        self.commits.push(commit);
+    pub fn add_new_commits(&mut self, mut commits: Vec<Commit>) {
+        self.commits.append(&mut commits);
     }
 }
 
@@ -263,7 +263,7 @@ pub struct Commit {
     /// length indexes cannot be odd.
     pub indexes: Vec<u32>,
     /// epoch during which the commitment is valid
-    pub epoch: u32,
+    pub epoch: U256,
     /// unique id that identifies commitment with the
     /// corresponding query id
     pub u: u32,
@@ -302,6 +302,21 @@ impl Commit {
         }
 
         keccak256(blob.as_slice()).into()
+    }
+
+    pub fn signing_address(&self) -> Option<Address> {
+        self.signature
+            .map(|signature| signature.recover(self.commit_hash()))
+            .map_or_else(
+                || None,
+                |r| {
+                    if let Ok(r) = r {
+                        Some(r)
+                    } else {
+                        None
+                    }
+                },
+            )
     }
 }
 
@@ -424,7 +439,7 @@ impl Storage {
 
     /// Adds new commit to the commit history
     /// of a wallet addess
-    pub fn add_new_commit_to_commit_history(&self, wallet_address: &Address, commit: Commit) {
+    pub fn add_commits_to_commit_history(&self, wallet_address: &Address, commits: Vec<Commit>) {
         let mut existing_h = {
             if let Some(h) = self.find_commit_history(wallet_address) {
                 h
@@ -437,13 +452,16 @@ impl Storage {
         };
 
         // add new commit to exisiting commits
-        existing_h.add_new_commit(commit);
+        existing_h.add_new_commits(commits);
 
         let mut db = self.db.lock().unwrap();
         let commit_history = db
             .open_tree(COMMIT_HISTORY)
             .expect("db: failed to open tree")
-            .insert(wallet_address.as_bytes(), bincode::serialize(&existing_h).unwrap());
+            .insert(
+                wallet_address.as_bytes(),
+                bincode::serialize(&existing_h).unwrap(),
+            );
     }
 
     /// Updates Active Trade

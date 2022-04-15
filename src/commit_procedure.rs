@@ -122,7 +122,7 @@ impl CommitProcedure {
         };
         Some(storage::Commit {
             indexes: Default::default(),
-            epoch: 0,
+            epoch: Default::default(),
             u: 0,
             c_type: storage::CommitType::T1,
             i_address: Default::default(),

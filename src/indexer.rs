@@ -114,7 +114,10 @@ impl Indexer {
     }
 
     pub async fn handle_network_event(&self, event: network::NetworkEvent) {
-        use network::{DseMessageRequest, DseMessageResponse, GossipsubMessage, NetworkEvent};
+        use network::{
+            CommitHistoryRequest, DseMessageRequest, DseMessageResponse, GossipsubMessage,
+            NetworkEvent,
+        };
         use storage::TradeStatus;
 
         match event {
@@ -415,6 +418,48 @@ impl Indexer {
                                 DseMessageResponse::Ack,
                             );
                         } else {
+                            send_dse_response(
+                                request_id,
+                                self.network_client.clone(),
+                                DseMessageResponse::Bad,
+                            );
+                        }
+                    }
+                    DseMessageRequest::CommitHistory(CommitHistoryRequest::WantHistory {
+                        wallet_address,
+                    }) => {
+                        if let Some(commit_history) =
+                            self.storage.find_commit_history(&wallet_address)
+                        {
+                            // send Ack
+                            send_dse_response(
+                                request_id,
+                                self.network_client.clone(),
+                                DseMessageResponse::Ack,
+                            );
+
+                            // FIXME: There are lot of things wrong here -
+                            // 1. Divide all commits into groups and send them over
+                            // few requests, so that each request data size is small.
+                            // 2. Don't handle this here. Spwan a new thread with a struct
+                            // to handle sending CommitHistory to a peer.
+                            let nc = self.network_client.clone();
+                            tokio::spawn(async move {
+                                nc.send_dse_message_request(
+                                    sender_peer_id,
+                                    DseMessageRequest::CommitHistory(
+                                        CommitHistoryRequest::Update {
+                                            wallet_address,
+                                            commits: commit_history.commits,
+                                            last_batch: true,
+                                        },
+                                    ),
+                                )
+                                .await;
+                            });
+                        } else {
+                            // Commit history does not exists
+                            // send back bad response
                             send_dse_response(
                                 request_id,
                                 self.network_client.clone(),

@@ -31,19 +31,35 @@ impl EthNode {
         })
     }
 
-    pub async fn validate_commitment_index(self, index: u64, epoch: u64, wallet_address: Address) {
+    pub async fn is_valid_commit_range(
+        self,
+        index: u64,
+        epoch: u64,
+        wallet_address: Address,
+    ) -> bool {
         let wallet = WalletContract::new(wallet_address, self.client.clone());
-        // let value = wallet.is_valid_commitment(index, epoch).call().await?;
-        // println!("EthNode: returned {:?}", value)
+
+        // TODO Call `is_valid_commit_range` and return the value
+        true
     }
 
     pub fn sign_message(&self, message: types::H256) -> types::Signature {
         self.wallet.sign_hash(message, true)
     }
 
-    pub async fn get_current_epoch(&self) {}
+    pub async fn get_current_epoch(&self, wallet_address: &Address) -> U256 {
+        let wallet = WalletContract::new(wallet_address.clone(), self.client.clone());
 
-    pub fn signer_address(&self) -> types::Address {
-        types::Address::zero()
+        // TODO get epoch from API
+
+        U256::default()
+    }
+
+    pub fn signer_address(&self) -> Address {
+        Address::zero()
+    }
+
+    pub async fn owner_address(&self, wallet_address: &Address) -> Address {
+        Default::default()
     }
 }

@@ -1,156 +1,222 @@
 [
-	{
-		"type": "function",
-		"name": "createGroupWithSafe",
-		"inputs": [
-			{
-				"internalType": "address",
-				"name": "safe",
-				"type": "address"
-			},
-			{
-				"internalType": "address",
-				"name": "groupSingleton",
-				"type": "address"
-			},
-			{
-				"internalType": "address",
-				"name": "tokenC",
-				"type": "address"
-			},
-			{
-				"internalType": "uint256",
-				"name": "donReservesLimit",
-				"type": "uint256"
-			},
-			{
-				"internalType": "bytes",
-				"name": "groupGlobalConfig",
-				"type": "bytes"
-			}
-		],
-		"outputs": [
-			{
-				"internalType": "contract GroupProxy",
-				"name": "groupProxy",
-				"type": "address"
-			}
-		],
-		"stateMutability": "nonpayable"
-	},
-	{
-		"type": "function",
-		"name": "createSafeAndGroup",
-		"inputs": [
-			{
-				"internalType": "address",
-				"name": "safeProxyFactory",
-				"type": "address"
-			},
-			{
-				"internalType": "address",
-				"name": "safeSingleton",
-				"type": "address"
-			},
-			{
-				"internalType": "address[]",
-				"name": "owners",
-				"type": "address[]"
-			},
-			{
-				"internalType": "uint256",
-				"name": "safeThreshold",
-				"type": "uint256"
-			},
-			{
-				"internalType": "address",
-				"name": "groupSingleton",
-				"type": "address"
-			},
-			{
-				"internalType": "address",
-				"name": "tokenC",
-				"type": "address"
-			},
-			{
-				"internalType": "uint256",
-				"name": "donReservesLimit",
-				"type": "uint256"
-			},
-			{
-				"internalType": "bytes",
-				"name": "groupMarketConfig",
-				"type": "bytes"
-			}
-		],
-		"outputs": [
-			{
-				"internalType": "contract GroupProxy",
-				"name": "groupProxy",
-				"type": "address"
-			}
-		],
-		"stateMutability": "nonpayable"
-	},
-	{
-		"type": "function",
-		"name": "createSafeAndGroupWithSenderAsOwner",
-		"inputs": [
-			{
-				"internalType": "address",
-				"name": "safeProxyFactory",
-				"type": "address"
-			},
-			{
-				"internalType": "address",
-				"name": "safeSingleton",
-				"type": "address"
-			},
-			{
-				"internalType": "uint256",
-				"name": "safeThreshold",
-				"type": "uint256"
-			},
-			{
-				"internalType": "address",
-				"name": "groupSingleton",
-				"type": "address"
-			},
-			{
-				"internalType": "address",
-				"name": "tokenC",
-				"type": "address"
-			},
-			{
-				"internalType": "uint256",
-				"name": "donReservesLimit",
-				"type": "uint256"
-			},
-			{
-				"internalType": "bytes",
-				"name": "groupMarketConfig",
-				"type": "bytes"
-			}
-		],
-		"outputs": [
-			{
-				"internalType": "contract GroupProxy",
-				"name": "groupProxy",
-				"type": "address"
-			}
-		],
-		"stateMutability": "nonpayable"
-	},
-	{
-		"type": "event",
-		"name": "GroupCreated",
-		"inputs": [
-			{
-				"name": "group",
-				"type": "address",
-				"indexed": true
-			}
-		],
-		"anonymous": false
-	}
-]
+    {
+      "inputs": [
+        {
+          "internalType": "uint256",
+          "name": "_epochDuration",
+          "type": "uint256"
+        },
+        {
+          "internalType": "uint256",
+          "name": "_indexValue",
+          "type": "uint256"
+        },
+        {
+          "internalType": "address",
+          "name": "_owner",
+          "type": "address"
+        },
+        {
+          "internalType": "address",
+          "name": "_currency",
+          "type": "address"
+        },
+        {
+          "internalType": "uint256",
+          "name": "_burnBuffer",
+          "type": "uint256"
+        }
+      ],
+      "stateMutability": "nonpayable",
+      "type": "constructor"
+    },
+    {
+      "inputs": [],
+      "name": "burnBuffer",
+      "outputs": [
+        {
+          "internalType": "uint256",
+          "name": "",
+          "type": "uint256"
+        }
+      ],
+      "stateMutability": "view",
+      "type": "function"
+    },
+    {
+      "inputs": [],
+      "name": "burnCommits",
+      "outputs": [],
+      "stateMutability": "nonpayable",
+      "type": "function"
+    },
+    {
+      "inputs": [
+        {
+          "internalType": "bytes32[]",
+          "name": "commitHash",
+          "type": "bytes32[]"
+        },
+        {
+          "internalType": "uint8[]",
+          "name": "v",
+          "type": "uint8[]"
+        },
+        {
+          "internalType": "bytes32[]",
+          "name": "r",
+          "type": "bytes32[]"
+        },
+        {
+          "internalType": "bytes32[]",
+          "name": "s",
+          "type": "bytes32[]"
+        }
+      ],
+      "name": "challengeBurnCommits",
+      "outputs": [],
+      "stateMutability": "nonpayable",
+      "type": "function"
+    },
+    {
+      "inputs": [],
+      "name": "currency",
+      "outputs": [
+        {
+          "internalType": "address",
+          "name": "",
+          "type": "address"
+        }
+      ],
+      "stateMutability": "view",
+      "type": "function"
+    },
+    {
+      "inputs": [],
+      "name": "currentEpoch",
+      "outputs": [
+        {
+          "internalType": "uint256",
+          "name": "",
+          "type": "uint256"
+        }
+      ],
+      "stateMutability": "view",
+      "type": "function"
+    },
+    {
+      "inputs": [],
+      "name": "epochDuration",
+      "outputs": [
+        {
+          "internalType": "uint256",
+          "name": "",
+          "type": "uint256"
+        }
+      ],
+      "stateMutability": "view",
+      "type": "function"
+    },
+    {
+      "inputs": [],
+      "name": "epochExpiresBy",
+      "outputs": [
+        {
+          "internalType": "uint256",
+          "name": "",
+          "type": "uint256"
+        }
+      ],
+      "stateMutability": "view",
+      "type": "function"
+    },
+    {
+      "inputs": [],
+      "name": "indexValue",
+      "outputs": [
+        {
+          "internalType": "uint256",
+          "name": "",
+          "type": "uint256"
+        }
+      ],
+      "stateMutability": "view",
+      "type": "function"
+    },
+    {
+      "inputs": [
+        {
+          "internalType": "uint256",
+          "name": "sIndex",
+          "type": "uint256"
+        },
+        {
+          "internalType": "uint256",
+          "name": "eIndex",
+          "type": "uint256"
+        },
+        {
+          "internalType": "uint256",
+          "name": "epoch",
+          "type": "uint256"
+        }
+      ],
+      "name": "isValidCommitRange",
+      "outputs": [
+        {
+          "internalType": "bool",
+          "name": "",
+          "type": "bool"
+        }
+      ],
+      "stateMutability": "view",
+      "type": "function"
+    },
+    {
+      "inputs": [],
+      "name": "owner",
+      "outputs": [
+        {
+          "internalType": "address",
+          "name": "",
+          "type": "address"
+        }
+      ],
+      "stateMutability": "view",
+      "type": "function"
+    },
+    {
+      "inputs": [],
+      "name": "redeemdType2",
+      "outputs": [],
+      "stateMutability": "nonpayable",
+      "type": "function"
+    },
+    {
+      "inputs": [],
+      "name": "reserves",
+      "outputs": [
+        {
+          "internalType": "uint256",
+          "name": "",
+          "type": "uint256"
+        }
+      ],
+      "stateMutability": "view",
+      "type": "function"
+    },
+    {
+      "inputs": [],
+      "name": "startEpoch",
+      "outputs": [],
+      "stateMutability": "nonpayable",
+      "type": "function"
+    },
+    {
+      "inputs": [],
+      "name": "withdraw",
+      "outputs": [],
+      "stateMutability": "nonpayable",
+      "type": "function"
+    }
+  ]

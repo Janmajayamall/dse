@@ -122,7 +122,7 @@ impl Client {
     }
 
     pub async fn send_dse_message_request(
-        &mut self,
+        &self,
         peer_id: PeerId,
         message: network::DseMessageRequest,
     ) -> Result<network::DseMessageResponse, anyhow::Error> {

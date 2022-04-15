@@ -4,8 +4,7 @@ use libp2p::kad::{
     record, Addresses, BootstrapError, GetRecordError, GetRecordOk, Kademlia, KademliaConfig,
     KademliaEvent, PutRecordOk, QueryId, QueryResult, Quorum, Record,
 };
-use libp2p::{gossipsub, request_response, Multiaddr, NetworkBehaviour, PeerId, Swarm, Transport};
-use std::error::Error;
+use libp2p::{gossipsub, request_response, Multiaddr, NetworkBehaviour, PeerId, Transport};
 use tokio::sync::{mpsc, oneshot};
 
 // client & event loop for network
@@ -36,7 +35,7 @@ impl Client {
     }
 
     pub async fn add_request_response_peer(
-        &mut self,
+        &self,
         peer_id: PeerId,
         peer_addr: Multiaddr,
     ) -> anyhow::Result<()> {

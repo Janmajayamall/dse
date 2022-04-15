@@ -4,8 +4,7 @@ use super::network_client;
 use super::storage::{self, TradeStatus};
 use log::error;
 use std::sync::Arc;
-use tokio::sync::{broadcast, mpsc};
-use tokio::time;
+use tokio::{sync::mpsc, time};
 
 // responsible for check whether
 pub struct CommitProcedure {
@@ -48,12 +47,16 @@ impl CommitProcedure {
         // Check that commit amount is in accordance with
         // the status.
 
+        // If node does not have commit history for the other node
+        // then request it 
+
         // update trade status to suitable processing status
         self.update_trade_processing_status();
 
         // Perform commit procedure
         // Simulates verification
         let mut interval = time::interval(time::Duration::from_secs(10));
+        interval.tick().await;
         interval.tick().await;
 
         // Update trade status suitable send status

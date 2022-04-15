@@ -14,6 +14,7 @@ mod network;
 mod network_client;
 mod server;
 mod storage;
+mod ch_request;
 
 #[derive(Debug, StructOpt)]
 #[structopt(name = "DSE args")]

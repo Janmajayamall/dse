@@ -123,6 +123,13 @@ impl Indexer {
                     "Received new query with id {} from requester_id {}",
                     query.id, query.requester_id
                 );
+
+                // add requester address to request response
+                _ = self
+                    .network_client
+                    .add_request_response_peer(query.requester_id, query.requester_addr.clone())
+                    .await;
+
                 self.storage.add_query_received(query);
                 // TODO inform client over WSS
             }
@@ -136,7 +143,7 @@ impl Indexer {
                         // Received PlaceBid request from Requester for placing a bid
                         // for a query. Therefore, first check whether node (i.e. Requester)
                         // sent a query with given query id.
-                        if let Ok(_) = self
+                        if self
                             .storage
                             .find_query_sent_by_query_id(&query_id)
                             .and_then(|q| {
@@ -148,11 +155,21 @@ impl Indexer {
                                     Err(anyhow::anyhow!("Peer id mismatch"))
                                 }
                             })
+                            .is_ok()
                         {
                             debug!(
                                 "PlaceBid request received for query_id {} from provider_id {}",
                                 query_id, bid.provider_id
                             );
+
+                            // add provider address to request response
+                            _ = self
+                                .network_client
+                                .add_request_response_peer(
+                                    bid.provider_id,
+                                    bid.provider_addr.clone(),
+                                )
+                                .await;
 
                             self.storage.add_bid_received_for_query(&query_id, bid);
                             send_dse_response(
@@ -242,7 +259,7 @@ impl Indexer {
 
                             // update waiting status to RSendT1Commit
                             trade.update_status(TradeStatus::RSendT1Commit);
-                            self.storage.update_active_trade(trade);
+                            _ = self.storage.update_active_trade(trade);
 
                             send_dse_response(
                                 request_id,

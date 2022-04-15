@@ -20,6 +20,58 @@ pub type QueryId = u32;
 
 use super::network_client;
 
+/// Commit history
+#[derive(Deserialize, Serialize, Debug, Clone)]
+pub struct CommitHistory {
+    /// Address that made these commits
+    of_address: Address,
+    /// All commits
+    commits: Vec<Commit>,
+}
+
+impl CommitHistory {
+    pub fn update_invalditing_signature(&mut self, id: u32, invalidating_signature: Signature) {
+        // TODO: Check that signature is valid for the given id
+
+        // TODO: Iterate thru all commits and add invalidating signature
+        // to commits corresponding to the given ID.
+
+        for c in self.commits.iter_mut() {
+            if c.u == id {
+                c.invalidating_signature = Some(invalidating_signature);
+            }
+        }
+    }
+
+    pub fn are_indexes_in_conflict(&self, indexes: &Vec<u32>) {
+        self.commits.iter().find(|c| {
+            // c_type T1 is invalidated with
+            // invalidating_signature
+            // Note that invalidating signature is validated
+            // before being added, so no need to validate it here
+            // again.
+            if c.c_type == CommitType::T1 && c.invalidating_signature != None {
+                false
+            } else {
+                let mut flag = false;
+                'outer: for i in 1..c.indexes.len() {
+                    for j in 1..indexes.len() {
+                        if indexes[j] >= c.indexes[i - 1] && indexes[j - 1] <= c.indexes[i] {
+                            flag = true;
+                            break 'outer;
+                        }
+                    }
+                }
+                flag
+            }
+        });
+    }
+
+    pub fn add_new_commit(&mut self, commit: Commit) {
+        self.commits.push(commit);
+    }
+}
+
 /// Stores qeury string and
 /// other realted info to the query
 #[derive(Deserialize, Serialize, Debug, Clone)]
@@ -199,8 +251,13 @@ pub enum CommitType {
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 pub struct Commit {
-    /// index used for the commitment
-    pub index: u32,
+    /// Index ranges used for commitment.
+    ///
+    /// There can one or more index ranges. Every index range
+    /// is defined by i & i + 1 element. Therefore, length of indexes
+    /// vec should atleast be 2 (i.e. At least one index range). Also,
+    /// length indexes cannot be odd.
+    pub indexes: Vec<u32>,
     /// epoch during which the commitment is valid
     pub epoch: u32,
     /// unique id that identifies commitment with the
@@ -216,6 +273,8 @@ pub struct Commit {
     pub r_address: Address,
     /// owner's signature on commitment's blob
     pub signature: Option<Signature>,
+    /// invalidting signature for the commit
+    pub invalidating_signature: Option<Signature>,
 }
 
 impl Commit {
@@ -252,6 +311,8 @@ const BIDS_RECEIVED: &[u8] = b"bids-received";
 
 const T1_COMMITS_RECEIVED: &[u8] = b"t1-commits-received";
 const T2_COMMITS_RECEIVED: &[u8] = b"t2-commits-received";
+
+const COMMIT_HISTORY: &[u8] = b"commit-history";
 
 pub struct Storage {
     /// Stores all graphs
@@ -354,6 +415,33 @@ impl Storage {
         trades.insert(query.id.to_be_bytes(), bincode::serialize(&trade).unwrap());
     }
 
+    /// Adds new commit to the commit history
+    /// of other node (i.e. of_address)
+    pub fn add_new_commit_to_commit_history(&self, of_address: &Address, commit: Commit) {
+        let mut existing_h = {
+            if let Some(h) = self.find_commit_history(of_address) {
+                h
+            } else {
+                CommitHistory {
+                    of_address: *of_address,
+                    commits: Default::default(),
+                }
+            }
+        };
+
+        // add new commit to exisiting commits
+        existing_h.add_new_commit(commit);
+
+        let mut db = self.db.lock().unwrap();
+        let commit_history = db
+            .open_tree(COMMIT_HISTORY)
+            .expect("db: failed to open tree")
+            .insert(
+                of_address.as_bytes(),
+                bincode::serialize(&existing_h).unwrap(),
+            );
+    }
+
     /// Updates Active Trade
     ///
     /// Returns err if Trade does not pre-exists.
@@ -430,6 +518,25 @@ impl Storage {
                 )
             })
             .collect()
+    }
+
+    /// Find commit history of `of_address`
+    pub fn find_commit_history(&self, of_address: &Address) -> Option<CommitHistory> {
+        let mut db = self.db.lock().unwrap();
+        db.open_tree(COMMIT_HISTORY)
+            .expect("db: failed to open tree")
+            .iter()
+            .find(|val| {
+                if let Ok(Ok(flag)) = val.map(|(_, cm)| {
+                    bincode::deserialize::<CommitHistory>(&cm)
+                        .map(|cm| cm.of_address == *of_address)
+                }) {
+                    flag
+                } else {
+                    false
+                }
+            })
+            .and_then(|val| Some(bincode::deserialize::<CommitHistory>(&val.unwrap().1).unwrap()))
     }
 
     /// Find all bids received for a query by query id

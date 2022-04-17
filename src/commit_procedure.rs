@@ -1,3 +1,4 @@
+use super::ch_request;
 use super::ethnode::EthNode;
 use super::network::DseMessageRequest;
 use super::network_client;
@@ -43,24 +44,56 @@ impl CommitProcedure {
     /// Should make sure that trade is in waiting status
     /// for self
     pub async fn verify(mut self, commit: storage::Commit) {
-        // Verify that the commit is valid for the trade.
-        // Check that commit amount is in accordance with
-        // the status.
+        // find wallet's ownet address
+        let owner_address = self.ethnode.owner_address(&commit.wallet_address).await;
 
-        // If node does not have commit history for the other node
-        // then request it
+        // Verify that the commit is valid for the trade.
+        if !commit.is_commit_valid(&self.trade, &owner_address) {
+            // TODO: Behaviour when a invalid commit
+            // received is still unknown.
+            // I suggest that we cancel the entire trade,
+            // so that we don't have to deal with complexity
+            // of recovery mechanism. Also, the peer is dishonest anyways
+            // so cutting off the trade makes sense.
+        }
 
         // update trade status to suitable processing status
         self.update_trade_processing_status();
 
-        // Perform commit procedure
-        // Simulates verification
-        let mut interval = time::interval(time::Duration::from_secs(10));
-        interval.tick().await;
-        interval.tick().await;
+        // If commit history of wallet does not exists,
+        // then first fetch it.
+        if self
+            .storage
+            .find_commit_history(&commit.wallet_address)
+            .is_none()
+        {
+            let mut req = ch_request::ChRequest {
+                network_client: self.network_client.clone(),
+                storage: self.storage.clone(),
+                ethnode: self.ethnode.clone(),
+            };
+
+            req.load_commit_history(&commit.wallet_address).await;
+        }
+
+        match self.storage.find_commit_history(&commit.wallet_address) {
+            Some(commit_history) => {
+                // TODO: Cancel trade if indexes are in conflict?
+                // Or ask for invalidatation signature if the commit
+                // in conflict type c1?
+                commit_history.are_indexes_in_conflict(&commit.indexes);
+            }
+            None => {}
+        }
 
         // Update trade status suitable send status
         self.update_trade_send_status();
+
+        // // Perform commit procedure
+        // // Simulates verification
+        // let mut interval = time::interval(time::Duration::from_secs(10));
+        // interval.tick().await;
+        // interval.tick().await;
     }
 
     /// Used for sending commits to peer for a trade

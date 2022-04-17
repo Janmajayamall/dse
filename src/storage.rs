@@ -45,16 +45,16 @@ impl CommitHistory {
 
     pub fn are_indexes_in_conflict(&self, indexes: &Vec<u32>) {
         self.commits.iter().find(|c| {
-            // c_type T1 is invalidated with
-            // invalidating_signature
-            // Note that invalidating signature is validated
-            // before being added, so no need to validate it here
-            // again.
             if c.c_type == CommitType::T1 && c.invalidating_signature != None {
+                // c_type T1 is invalidated with
+                // invalidating_signature
+                // Note that invalidating signature is validated
+                // before being added, so no need to validate it here
+                // again.
                 false
             } else {
                 let mut flag = false;
-                'outer: for i in 1..c.indexes.len() {
+                'outer: for i in (1..c.indexes.len()).step_by(2) {
                     for j in 1..indexes.len() {
                         if indexes[j] >= c.indexes[i - 1] && indexes[j - 1] <= c.indexes[i] {
                             flag = true;
@@ -305,18 +305,43 @@ impl Commit {
     }
 
     pub fn signing_address(&self) -> Option<Address> {
-        self.signature
-            .map(|signature| signature.recover(self.commit_hash()))
-            .map_or_else(
-                || None,
-                |r| {
-                    if let Ok(r) = r {
-                        Some(r)
-                    } else {
-                        None
-                    }
-                },
-            )
+        self.signature.and_then(|signature| {
+            signature
+                .recover(self.commit_hash())
+                .map_or_else(|_| None, |s| Some(s))
+        })
+    }
+
+    /// Validates received commitment.
+    /// Returns true if valid, otherwise false.
+    ///
+    /// > **Note**
+    /// > Call this before transitioning from SOMETHING
+    /// > Waiting to SOMETHING Processing
+    pub fn is_commit_valid(&self, trade: &Trade, owner_address: &Address) -> bool {
+        // 2 consecutive values define 1 index range,
+        // thus indexes can only be in increasing order.
+        for i in 1..self.indexes.len() {
+            if self.indexes[i] < self.indexes[i - 1] {
+                return false;
+            }
+        }
+
+        // Check signature
+        if self
+            .signing_address()
+            .map_or_else(|| true, |a| a != *owner_address)
+        {
+            return false;
+        }
+
+        // FIXME: Add validations
+        match trade.status {
+            TradeStatus::WaitingRT1Commit => true,
+            TradeStatus::WaitingPT1Commit => true,
+            TradeStatus::WaitingRT2Commit => true,
+            _ => false,
+        }
     }
 }
 

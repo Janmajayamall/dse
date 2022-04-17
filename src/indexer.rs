@@ -128,10 +128,10 @@ impl Indexer {
                 );
 
                 // add requester address to request response
-                _ = self
-                    .network_client
-                    .add_request_response_peer(query.requester_id, query.requester_addr.clone())
-                    .await;
+                // _ = self
+                //     .network_client
+                //     .add_request_response_peer(query.requester_id, query.requester_addr.clone())
+                //     .await;
 
                 self.storage.add_query_received(query);
                 // TODO inform client over WSS
@@ -166,13 +166,13 @@ impl Indexer {
                             );
 
                             // add provider address to request response
-                            _ = self
-                                .network_client
-                                .add_request_response_peer(
-                                    bid.provider_id,
-                                    bid.provider_addr.clone(),
-                                )
-                                .await;
+                            // _ = self
+                            //     .network_client
+                            //     .add_request_response_peer(
+                            //         bid.provider_id,
+                            //         bid.provider_addr.clone(),
+                            //     )
+                            //     .await;
 
                             self.storage.add_bid_received_for_query(&query_id, bid);
                             send_dse_response(

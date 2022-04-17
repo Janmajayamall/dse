@@ -4,14 +4,23 @@ use super::network_client;
 use super::storage::{self};
 use ethers::types::{Address, Signature, H256, U256};
 use libp2p::{kad::record, PeerId};
+use log::debug;
 use std::{sync::Arc, time::SystemTime};
 use tokio::time;
+
+#[derive(Clone, PartialEq)]
+enum State {
+    Pending,
+    InProgress,
+    Ended,
+}
 
 struct LoadingState {
     pub peers: Vec<PeerId>,
     pub request_count: u32,
     pub loading_in_progress: bool,
     pub timeout: SystemTime,
+    pub state: State,
 }
 
 impl LoadingState {
@@ -22,7 +31,7 @@ impl LoadingState {
             self.request_count += 1;
         } else {
             self.request_count = 1;
-            self.peers.remove(1);
+            self.peers.remove(0);
         }
 
         self.peers.first().and_then(|v| Some(v.clone()))
@@ -38,9 +47,9 @@ pub struct ChRequest {
 impl ChRequest {
     /// Loads commit history of a wallet address
     /// by first finding `providers` for the wallet
-    /// on DHT and querying `N` (N = 1 for now)of
+    /// on DHT and querying `N` (N = 1 for now) of
     /// them for history.
-    pub async fn load_commit_history(&mut self, wallet_address: Address) {
+    pub async fn load_commit_history(&mut self, wallet_address: &Address) {
         // find providers on DHT
         match self
             .network_client
@@ -48,22 +57,29 @@ impl ChRequest {
             .await
         {
             Ok(response) => {
+                let peers = response.providers.into_iter().collect();
+                debug!(
+                    "Found providers {:?} for wallet_address {}",
+                    peers, wallet_address
+                );
+
                 // find wallet_address's current epoch and owner_address
                 let epoch = self.ethnode.get_current_epoch(&wallet_address).await;
                 let owner_address = self.ethnode.owner_address(&wallet_address).await;
 
                 // prepare loading state
                 let mut loading_state = LoadingState {
-                    peers: response.providers.into_iter().collect(),
+                    peers,
                     request_count: 0,
                     loading_in_progress: false,
                     timeout: SystemTime::now(),
+                    state: State::Pending,
                 };
 
                 if let Ok(mut network_event_receiver) =
                     self.network_client.subscribe_network_events().await
                 {
-                    let mut interval = time::interval(time::Duration::from_secs(5));
+                    let mut interval = time::interval(time::Duration::from_secs(10));
 
                     loop {
                         tokio::select! {
@@ -72,64 +88,64 @@ impl ChRequest {
                                     network::NetworkEvent::DseMessageRequestRecv{
                                         sender_peer_id,
                                         request_id,
-                                        request
+                                        request: network::DseMessageRequest::CommitHistory(network::CommitHistoryRequest::Update{
+                                            wallet_address,
+                                            commits,
+                                            last_batch
+                                        })
                                     } => {
-                                        match request {
-                                            network::DseMessageRequest::CommitHistory(network::CommitHistoryRequest::Update{
-                                                    wallet_address,
-                                                    commits,
-                                                    last_batch
-                                                }
-                                            )=>{
-                                                // check that all commits are valid
-                                                let commits = commits.into_iter().filter(|c| {
-                                                    // TODO add more checks if there exist
-                                                    c.epoch == epoch && c.signing_address().map_or_else(|| false, |signature| signature == owner_address)
-                                                }).collect();
+                                        debug!("Recevied commit history for wallet address {}", wallet_address);
 
-                                                // FIXME: We might be adding duplicate commits.
-                                                // Change this behaviour later
-                                                self.storage.add_commits_to_commit_history(&wallet_address, commits);
+                                        // check that all commits are valid
+                                        let commits = commits.into_iter().filter(|c| {
+                                            // TODO add more checks if there exist
+                                            c.epoch == epoch && c.signing_address().map_or_else(|| false, |signature| signature == owner_address)
+                                        }).collect();
 
-                                                // reseet timeout
-                                                loading_state.timeout = SystemTime::now();
+                                        // FIXME: We might be adding duplicate commits.
+                                        // Change this behaviour later. Also we haven't
+                                        // checked commits for whether signatures are valid.
+                                        self.storage.add_commits_to_commit_history(&wallet_address, commits);
 
-                                                if last_batch {
-                                                    return;
-                                                }
-                                            },
-                                            _ => {}
+                                        // reseet timeout
+                                        loading_state.timeout = SystemTime::now();
+
+                                        if last_batch {
+                                            loading_state.state = State::Ended;
                                         }
-
                                     },
                                     _ => {
 
                                     }
                                 }
-
-                                // TODO catch necessary network events related to commit history
-                                // and add them to storage
                             }
                             _ = interval.tick() => {
 
-                                // If there has been no request for `30 Secs`
-                                // then query a new peer.
-                                if loading_state.timeout.elapsed().map_or_else(|_| true, |e| e.as_secs() > 30) {
-                                    // send a request to one of the peers
-                                    if let Some(peer_id) = loading_state.query_from() {
-                                        match self.network_client.send_dse_message_request(peer_id, network::DseMessageRequest::CommitHistory(network::CommitHistoryRequest::WantHistory{wallet_address })).await {
-                                            Ok(network::DseMessageResponse::Ack) => {
-                                                // reset timeout
-                                                loading_state.timeout = SystemTime::now();
-                                            },
-                                            _ => {
-                                                // FIXME: Rn we just wait for next 30 secs if peer either fails
-                                                // to respond or send a Bad response.
-                                                // We might want to change this behaviour.
+                                if loading_state.state == State::Ended {
+                                    return
+                                }else {
+                                    // If there has been no request for `30 Secs`
+                                    // then query a new peer.
+                                    if  loading_state.state == State::Pending || loading_state.timeout.elapsed().map_or_else(|_| true, |e| e.as_secs() > 30) {
+                                        // send a request to one of the peers
+                                        if let Some(peer_id) = loading_state.query_from() {
+                                            match self.network_client.send_dse_message_request(peer_id, network::DseMessageRequest::CommitHistory(network::CommitHistoryRequest::WantHistory{wallet_address:*wallet_address})).await {
+                                                Ok(network::DseMessageResponse::Ack) => {
+                                                    // reset timeout
+                                                    loading_state.timeout = SystemTime::now();
+                                                    loading_state.state = State::InProgress;
+                                                },
+                                                _ => {
+                                                    // FIXME: Rn we just wait for next `interval` if peer either fails
+                                                    // to respond or sends a Bad response.
+                                                    // We might want to change this behaviour.
+                                                }
                                             }
+                                        }else {
+                                            // TODO there are no peers to query from.
+                                            // Probably return gracefully, since `No Providers`
+                                            // means wallet hasn't made pervious commitments.
                                         }
-                                    }else {
-                                        //TODO there are no peers to query from
                                     }
                                 }
                             }
@@ -141,7 +157,5 @@ impl ChRequest {
             }
             Err(e) => {}
         }
-
-        // start querying one of them for the commit history
     }
 }

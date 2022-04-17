@@ -1,4 +1,3 @@
-use async_std::channel;
 use async_std::prelude::StreamExt;
 use async_trait::async_trait;
 use futures::{AsyncRead, AsyncWrite};
@@ -11,13 +10,13 @@ use libp2p::core::upgrade::{read_length_prefixed, write_length_prefixed, SelectU
 use libp2p::core::ConnectedPoint;
 use libp2p::dns::TokioDnsConfig;
 use libp2p::gossipsub::{self, error::GossipsubHandlerError, Gossipsub, GossipsubEvent};
-use libp2p::identity::{secp256k1, Keypair};
+use libp2p::identity::Keypair;
 use libp2p::kad::record::store::MemoryStore;
 use libp2p::kad::record::Key;
 use libp2p::kad::{
-    AddProviderOk, Addresses, BootstrapError, GetProvidersOk, GetRecordError, GetRecordOk,
-    Kademlia, KademliaConfig, KademliaEvent, KademliaStoreInserts, PutRecordOk, QueryId,
-    QueryResult, Quorum, Record,
+    AddProviderOk, Addresses, BootstrapError, GetProvidersOk, GetRecordOk, Kademlia,
+    KademliaConfig, KademliaEvent, KademliaStoreInserts, PutRecordOk, QueryId, QueryResult, Quorum,
+    Record,
 };
 use libp2p::mdns::{Mdns, MdnsConfig, MdnsEvent};
 use libp2p::mplex::MplexConfig;
@@ -31,16 +30,15 @@ use libp2p::swarm::{ConnectionHandlerUpgrErr, SwarmBuilder, SwarmEvent};
 use libp2p::tcp::TokioTcpConfig;
 use libp2p::yamux::YamuxConfig;
 use libp2p::{Multiaddr, NetworkBehaviour, PeerId, Swarm, Transport};
-use log::{debug, error, info, warn};
+use log::{debug, error, warn};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::convert::TryFrom;
-use std::error::Error;
+
 use std::time::Duration;
 use tokio::sync::{broadcast, mpsc, oneshot};
 use tokio::{io, select};
 
-use super::indexer;
 use super::storage;
 
 #[derive(NetworkBehaviour)]
@@ -251,7 +249,6 @@ impl Network {
         }
 
         // Start listening on default addr
-        // TODO: make listen address configurable
         if let Err(e) = swarm.listen_on(listen_on) {
             error!(
                 "Failed to start listening on default address with error {}",

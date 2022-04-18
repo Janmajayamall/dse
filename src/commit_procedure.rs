@@ -60,12 +60,12 @@ impl CommitProcedure {
         // update trade status to suitable processing status
         self.update_trade_processing_status();
 
-        // If commit history of wallet does not exists,
-        // then first fetch it.
-        if self
+        // If node hasn't been tracking wallet_address's
+        // commits, then fetch them from DHT
+        if !self
             .storage
-            .find_commit_history(&commit.wallet_address)
-            .is_none()
+            .get_wallets_of_interest()
+            .exists(&commit.wallet_address)
         {
             let mut req = ch_request::ChRequest {
                 network_client: self.network_client.clone(),
@@ -73,7 +73,13 @@ impl CommitProcedure {
                 ethnode: self.ethnode.clone(),
             };
 
-            req.load_commit_history(&commit.wallet_address).await;
+            if let Err(_) = req.load_commit_history(&commit.wallet_address).await {
+                // TODO Treat this as invalid commit
+            }
+
+            // Add wallet_address to wallets of interest
+            // to track wallet's commits in future
+            self.storage.add_wallet_of_interest(&commit.wallet_address)
         }
 
         match self.storage.find_commit_history(&commit.wallet_address) {

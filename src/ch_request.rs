@@ -1,10 +1,10 @@
-use super::ethnode::{self, EthNode};
 use super::network_client;
 use super::storage::{self};
+use crate::ethnode::EthNode;
 use crate::network::{CommitRequest, CommitResponse, NetworkEvent};
-use ethers::types::{Address, Signature, H256, U256};
+use ethers::types::Address;
 use libp2p::{kad::record, PeerId};
-use log::debug;
+use log::{debug, error};
 use std::{sync::Arc, time::SystemTime};
 use tokio::time;
 
@@ -49,7 +49,7 @@ impl ChRequest {
     /// by first finding `providers` for the wallet
     /// on DHT and querying `N` (N = 1 for now) of
     /// them for history.
-    pub async fn load_commit_history(&mut self, wallet_address: &Address) {
+    pub async fn load_commit_history(&mut self, wallet_address: &Address) -> anyhow::Result<()> {
         // find providers on DHT
         match self
             .network_client
@@ -119,9 +119,9 @@ impl ChRequest {
 
                             }
                             _ = interval.tick() => {
-
                                 if loading_state.state == State::Ended {
-                                    return
+                                    // loaded commit history of wallet
+                                    return Ok(());
                                 }else {
                                     // If there has been no request for `30 Secs`
                                     // then query a new peer.
@@ -142,9 +142,10 @@ impl ChRequest {
                                             }
 
                                         }else {
-                                            // TODO there are no peers to query from.
-                                            // Probably return gracefully, since `No Providers`
-                                            // means wallet hasn't made pervious commitments.
+                                            debug!("No more peers left to query commit hisotry from for wallet address {}", wallet_address);
+                                            // Probably means that means wallet hasn't made pervious commitments.
+                                            // resolve with Ok
+                                            return Ok(());
                                         }
                                     }
                                 }
@@ -152,10 +153,17 @@ impl ChRequest {
                         }
                     }
                 } else {
-                    // TODO: return with error
+                    error!("failed to subscribes to networke events!");
+                    Err(anyhow::anyhow!("Failed!"))
                 }
             }
-            Err(e) => {}
+            Err(e) => {
+                error!(
+                    "Dht get providers failed for wallet address {}",
+                    wallet_address
+                );
+                Err(anyhow::anyhow!("Failed!"))
+            }
         }
     }
 }

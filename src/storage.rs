@@ -9,6 +9,7 @@ use rand::Rng;
 use serde::{Deserialize, Serialize};
 use sled::{Config, Db};
 use std::{
+    collections::HashSet,
     sync::{
         atomic::{AtomicUsize, Ordering},
         Mutex,
@@ -169,13 +170,6 @@ impl Bid {
 
 #[derive(Deserialize, Serialize, Debug, PartialEq, Clone)]
 pub enum TradeStatus {
-    /// Provider should send StartCommit
-    /// /// FIXME: Not needed anymore
-    PSendStartCommit,
-    /// Requester is waiting for Start Commit
-    /// from provider
-    /// FIXME: Not needed anymore
-    WaitingStartCommit,
     /// Provider is waiting for Requester's T1
     /// Commit
     WaitingRT1Commit,
@@ -302,7 +296,7 @@ pub struct Commit {
     /// There can one or more index ranges. Every index range
     /// is defined by i & i + 1 element. Therefore, length of indexes
     /// vec should atleast be 2 (i.e. At least one index range). Also,
-    /// length indexes cannot be odd.
+    /// length of indexes vec cannot be odd.
     pub indexes: Vec<u32>,
     /// epoch during which the commitment is valid
     pub epoch: U256,
@@ -387,6 +381,29 @@ impl Commit {
     }
 }
 
+#[derive(Deserialize, Serialize)]
+struct WalletsOfInterest {
+    wallets: HashSet<Address>,
+}
+
+impl Default for WalletsOfInterest {
+    fn default() -> Self {
+        Self {
+            wallets: Default::default(),
+        }
+    }
+}
+
+impl WalletsOfInterest {
+    pub fn add(&mut self, wallet_address: &Address) {
+        self.wallets.insert(*wallet_address);
+    }
+
+    pub fn exists(&self, wallet_address: &Address) -> bool {
+        self.wallets.contains(wallet_address)
+    }
+}
+
 /// tree that stores trades for every query
 
 const OLD_TRADES: &[u8] = b"old-trades";
@@ -405,6 +422,8 @@ const COMMIT_HISTORY: &[u8] = b"commit-history";
 
 const START_COMMITS: &[u8] = b"start-commits";
 const I_WANTS: &[u8] = b"i-wants";
+
+const WALLETS_OF_INTEREST: &[u8] = b"wallets-of-interest";
 
 pub struct Storage {
     /// Stores all graphs
@@ -451,6 +470,18 @@ impl Storage {
             .expect("db: failed to open tree");
 
         tree.insert(msg.id.to_be_bytes(), bincode::serialize(&msg).unwrap());
+    }
+
+    // Adds a wallet of interest
+    pub fn add_wallet_of_interest(&self, wallet_address: &Address) {
+        let prev = self.get_wallets_of_interest();
+        prev.add(wallet_address);
+
+        let mut db = self.db.lock().unwrap();
+        let tree = db
+            .open_tree(ACTIVE_TRADES)
+            .expect("db: failed to open tree")
+            .insert(WALLETS_OF_INTEREST, bincode::serialize(&prev).unwrap());
     }
 
     /// Adds newly received bid to query's
@@ -610,6 +641,25 @@ impl Storage {
                 )
             })
             .collect()
+    }
+
+    /// Gets all wallets of interest
+    pub fn get_wallets_of_interest(&self) -> WalletsOfInterest {
+        let mut db = self.db.lock().unwrap();
+        db.open_tree(WALLETS_OF_INTEREST)
+            .expect("db: failed to open tree")
+            .iter()
+            .find(|res| {
+                if let Ok(flag) = res.map(|(id, val)| id == WALLETS_OF_INTEREST) {
+                    flag
+                } else {
+                    false
+                }
+            })
+            .map_or_else(
+                || WalletsOfInterest::default(),
+                |val| bincode::deserialize::<WalletsOfInterest>(&val.unwrap().1).unwrap(),
+            )
     }
 
     /// Find commit history of `wallet_address`

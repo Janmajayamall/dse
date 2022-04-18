@@ -1,8 +1,8 @@
 use async_trait::async_trait;
 use futures::{AsyncRead, AsyncWrite};
-use libp2p::core::upgrade::{read_length_prefixed, write_length_prefixed, SelectUpgrade};
+use libp2p::core::upgrade::{read_length_prefixed, write_length_prefixed};
 use libp2p::core::ProtocolName;
-use libp2p::request_response::{RequestResponseCodec};
+use libp2p::request_response::RequestResponseCodec;
 use serde::{de::DeserializeOwned, ser::Serialize};
 use std::io;
 use std::marker::PhantomData;

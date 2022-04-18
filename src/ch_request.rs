@@ -1,7 +1,7 @@
 use super::ethnode::{self, EthNode};
-use super::network::{self};
 use super::network_client;
 use super::storage::{self};
+use crate::network::{CommitRequest, CommitResponse, NetworkEvent};
 use ethers::types::{Address, Signature, H256, U256};
 use libp2p::{kad::record, PeerId};
 use log::debug;
@@ -85,16 +85,16 @@ impl ChRequest {
                         tokio::select! {
                             Ok(event) = network_event_receiver.recv() => {
                                 match event {
-                                    network::NetworkEvent::DseMessageRequestRecv{
+                                    NetworkEvent::CommitRequest{
                                         sender_peer_id,
                                         request_id,
-                                        request: network::DseMessageRequest::CommitHistory(network::CommitHistoryRequest::Update{
+                                        request: CommitRequest::Update {
                                             wallet_address,
                                             commits,
-                                            last_batch
-                                        })
+                                            last_batch,
+                                        }
                                     } => {
-                                        debug!("Recevied commit history for wallet address {}", wallet_address);
+                                        debug!("Received commit history for wallet address {}", wallet_address);
 
                                         // check that all commits are valid
                                         let commits = commits.into_iter().filter(|c| {
@@ -113,11 +113,10 @@ impl ChRequest {
                                         if last_batch {
                                             loading_state.state = State::Ended;
                                         }
-                                    },
-                                    _ => {
-
                                     }
+                                    _ => {}
                                 }
+
                             }
                             _ = interval.tick() => {
 
@@ -129,8 +128,8 @@ impl ChRequest {
                                     if  loading_state.state == State::Pending || loading_state.timeout.elapsed().map_or_else(|_| true, |e| e.as_secs() > 30) {
                                         // send a request to one of the peers
                                         if let Some(peer_id) = loading_state.query_from() {
-                                            match self.network_client.send_dse_message_request(peer_id, network::DseMessageRequest::CommitHistory(network::CommitHistoryRequest::WantHistory{wallet_address:*wallet_address})).await {
-                                                Ok(network::DseMessageResponse::Ack) => {
+                                            match self.network_client.send_commit_request(peer_id, CommitRequest::WantHistory{wallet_address:*wallet_address}).await {
+                                                Ok(CommitResponse::Ack) => {
                                                     // reset timeout
                                                     loading_state.timeout = SystemTime::now();
                                                     loading_state.state = State::InProgress;
@@ -141,6 +140,7 @@ impl ChRequest {
                                                     // We might want to change this behaviour.
                                                 }
                                             }
+
                                         }else {
                                             // TODO there are no peers to query from.
                                             // Probably return gracefully, since `No Providers`

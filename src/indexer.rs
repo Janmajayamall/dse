@@ -1,19 +1,18 @@
-use async_std::channel;
-use libp2p::{identity::Keypair, request_response::RequestId};
+use super::commit_procedure;
+use super::ethnode;
+use super::network_client;
+use super::server;
+use super::storage;
+use crate::network::{
+    CommitRequest, CommitResponse, ExchangeRequest, ExchangeResponse, GossipsubMessage,
+    NetworkEvent,
+};
+use libp2p::{identity::Keypair, request_response::RequestId, PeerId};
 use log::{debug, error, info};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use tokio::sync::{broadcast, mpsc};
 use tokio::{select, time};
-
-use crate::storage::QueryId;
-
-use super::commit_procedure;
-use super::ethnode;
-use super::network;
-use super::network_client;
-use super::server;
-use super::storage;
 /// Main interface thru which user interacts.
 /// That means sends and receives querues & bids.
 pub struct Indexer {
@@ -23,7 +22,7 @@ pub struct Indexer {
 
     /// network client
     network_client: network_client::Client,
-    network_event_receiver: broadcast::Receiver<network::NetworkEvent>,
+    network_event_receiver: broadcast::Receiver<NetworkEvent>,
 
     /// global database
     storage: Arc<storage::Storage>,
@@ -36,14 +35,14 @@ pub struct Indexer {
 
     // query ids of trades in send status currently
     // with active send() CommitProcedure
-    active_send_commit_proc: HashSet<QueryId>,
+    active_send_commit_proc: HashSet<u32>,
 }
 
 impl Indexer {
     pub fn new(
         keypair: Keypair,
         network_client: network_client::Client,
-        network_event_receiver: broadcast::Receiver<network::NetworkEvent>,
+        network_event_receiver: broadcast::Receiver<NetworkEvent>,
         storage: Arc<storage::Storage>,
         ethnode: ethnode::EthNode,
     ) -> Self {
@@ -77,8 +76,8 @@ impl Indexer {
                 _ = interval.tick() => {
                     // get all active trades
                     for trade in self.storage.get_active_trades() {
-                        if trade.is_sending_status() && !self.active_send_commit_proc.contains(&trade.query_id) {
-                            self.active_send_commit_proc.insert(trade.query_id);
+                        if trade.is_sending_status() && !self.active_send_commit_proc.contains(&trade.id) {
+                            self.active_send_commit_proc.insert(trade.id);
 
                             // start send() commit procedure
                             let proc = commit_procedure::CommitProcedure::new(
@@ -101,11 +100,11 @@ impl Indexer {
                 Some(event) = self.commit_proc_event_receiver.recv() => {
                     use commit_procedure::CommitProcedureEvent;
                     match event {
-                        CommitProcedureEvent::SendSuccess{ query_id } => {
-                            self.active_send_commit_proc.remove(&query_id);
+                        CommitProcedureEvent::SendSuccess{ trade_id } => {
+                            self.active_send_commit_proc.remove(&trade_id);
                         },
-                        CommitProcedureEvent::SendFailed{ query_id } => {
-                            self.active_send_commit_proc.remove(&query_id);
+                        CommitProcedureEvent::SendFailed{ trade_id } => {
+                            self.active_send_commit_proc.remove(&trade_id);
                         }
                     };
                 }
@@ -113,13 +112,8 @@ impl Indexer {
         }
     }
 
-    pub async fn handle_network_event(&self, event: network::NetworkEvent) {
-        use network::{
-            CommitHistoryRequest, DseMessageRequest, DseMessageResponse, GossipsubMessage,
-            NetworkEvent,
-        };
+    pub async fn handle_network_event(&self, event: NetworkEvent) {
         use storage::TradeStatus;
-
         match event {
             NetworkEvent::GossipsubMessageRecv(GossipsubMessage::NewQuery(query)) => {
                 debug!(
@@ -136,119 +130,176 @@ impl Indexer {
                 self.storage.add_query_received(query);
                 // TODO inform client over WSS
             }
-            NetworkEvent::DseMessageRequestRecv {
+            NetworkEvent::ExchangeRequest {
                 sender_peer_id,
                 request_id,
                 request,
             } => {
                 match request {
-                    DseMessageRequest::PlaceBid { query_id, bid } => {
-                        // Received PlaceBid request from Requester for placing a bid
-                        // for a query. Therefore, first check whether node (i.e. Requester)
-                        // sent a query with given query id.
-                        if self
-                            .storage
-                            .find_query_sent_by_query_id(&query_id)
-                            .and_then(|q| {
-                                // provider_id should match sender_peer_id
-                                // from whom request was received
-                                if bid.provider_id == sender_peer_id {
-                                    Ok(q)
-                                } else {
-                                    Err(anyhow::anyhow!("Peer id mismatch"))
-                                }
-                            })
-                            .is_ok()
-                        {
-                            debug!(
-                                "PlaceBid request received for query_id {} from provider_id {}",
-                                query_id, bid.provider_id
-                            );
+                    // DseMessageRequest::PlaceBid { query_id, bid } => {
+                    //     // // Received PlaceBid request from Requester for placing a bid
+                    //     // // for a query. Therefore, first check whether node (i.e. Requester)
+                    //     // // sent a query with given query id.
+                    //     // if self
+                    //     //     .storage
+                    //     //     .find_query_sent_by_query_id(&query_id)
+                    //     //     .and_then(|q| {
+                    //     //         // provider_id should match sender_peer_id
+                    //     //         // from whom request was received
+                    //     //         if bid.provider_id == sender_peer_id {
+                    //     //             Ok(q)
+                    //     //         } else {
+                    //     //             Err(anyhow::anyhow!("Peer id mismatch"))
+                    //     //         }
+                    //     //     })
+                    //     //     .is_ok()
+                    //     // {
+                    //     //     debug!(
+                    //     //         "PlaceBid request received for query_id {} from provider_id {}",
+                    //     //         query_id, bid.provider_id
+                    //     //     );
 
-                            // add provider address to request response
-                            // _ = self
-                            //     .network_client
-                            //     .add_request_response_peer(
-                            //         bid.provider_id,
-                            //         bid.provider_addr.clone(),
-                            //     )
-                            //     .await;
+                    //     //     // add provider address to request response
+                    //     //     // _ = self
+                    //     //     //     .network_client
+                    //     //     //     .add_request_response_peer(
+                    //     //     //         bid.provider_id,
+                    //     //     //         bid.provider_addr.clone(),
+                    //     //     //     )
+                    //     //     //     .await;
 
-                            self.storage.add_bid_received_for_query(&query_id, bid);
-                            send_dse_response(
-                                request_id,
-                                self.network_client.clone(),
-                                DseMessageResponse::Ack,
-                            );
+                    //     //     self.storage.add_bid_received_for_query(&query_id, bid);
+                    //     //     send_dse_response(
+                    //     //         request_id,
+                    //     //         self.network_client.clone(),
+                    //     //         DseMessageResponse::Ack,
+                    //     //     );
 
-                            // TODO inform the clients over WSS
-                        } else {
-                            send_dse_response(
-                                request_id,
-                                self.network_client.clone(),
-                                DseMessageResponse::Bad,
-                            );
-                        }
+                    //     //     // TODO inform the clients over WSS
+                    //     // } else {
+                    //     //     send_dse_response(
+                    //     //         request_id,
+                    //     //         self.network_client.clone(),
+                    //     //         DseMessageResponse::Bad,
+                    //     //     );
+                    //     // }
+                    // }
+                    // DseMessageRequest::AcceptBid { query_id } => {
+                    //     // // Received AcceptBid from Requester for bid placed by Node
+                    //     // // (i.e. Provider) on their query with given query id.
+                    //     // // Therefore, first check that bid was placed & query was received by
+                    //     // // the Node.
+                    //     // if let Ok((bid, query)) = self
+                    //     //     .storage
+                    //     //     .find_bid_sent_by_query_id(&query_id)
+                    //     //     .and_then(|bid| {
+                    //     //         self.storage
+                    //     //             .find_query_received_by_query_id(&query_id)
+                    //     //             .and_then(|query| {
+                    //     //                 // Check that sender is the requester of query
+                    //     //                 if query.requester_id == sender_peer_id {
+                    //     //                     Ok((bid, query))
+                    //     //                 } else {
+                    //     //                     Err(anyhow::anyhow!("Peer id mismatch"))
+                    //     //                 }
+                    //     //             })
+                    //     //     })
+                    //     // {
+                    //     //     debug!(
+                    //     //         "AcceptBid request received for query_id {} from requester_id {}",
+                    //     //         query_id, sender_peer_id
+                    //     //     );
+
+                    //     //     // is_requester = false, since node is provider
+                    //     //     // FIXME:
+                    //     //     // self.storage.add_new_trade(query, bid, false);
+
+                    //     //     send_dse_response(
+                    //     //         request_id,
+                    //     //         self.network_client.clone(),
+                    //     //         DseMessageResponse::Ack,
+                    //     //     );
+
+                    //     //     // TODO inform clients over WSS
+                    //     // } else {
+                    //     //     send_dse_response(
+                    //     //         request_id,
+                    //     //         self.network_client.clone(),
+                    //     //         DseMessageResponse::Bad,
+                    //     //     );
+                    //     //     // TODO send bad response
+                    //     // }
+                    // }
+                    ExchangeRequest::IWant { i_want } => {
+                        _ = self.storage.add_i_want(&i_want);
+
+                        // TODO send over WSS
+
+                        send_exchange_response(
+                            sender_peer_id,
+                            request_id,
+                            self.network_client.clone(),
+                            ExchangeResponse::Ack,
+                        );
                     }
-                    DseMessageRequest::AcceptBid { query_id } => {
-                        // Received AcceptBid from Requester for bid placed by Node
-                        // (i.e. Provider) on their query with given query id.
-                        // Therefore, first check that bid was placed & query was received by
-                        // the Node.
-                        if let Ok((bid, query)) = self
-                            .storage
-                            .find_bid_sent_by_query_id(&query_id)
-                            .and_then(|bid| {
-                                self.storage
-                                    .find_query_received_by_query_id(&query_id)
-                                    .and_then(|query| {
-                                        // Check that sender is the requester of query
-                                        if query.requester_id == sender_peer_id {
-                                            Ok((bid, query))
-                                        } else {
-                                            Err(anyhow::anyhow!("Peer id mismatch"))
-                                        }
-                                    })
-                            })
-                        {
-                            debug!(
-                                "AcceptBid request received for query_id {} from requester_id {}",
-                                query_id, sender_peer_id
-                            );
+                    ExchangeRequest::StartCommit { trade } => {
+                        // TODO: validate received trade from provider
+                        _ = self.storage.add_active_trade(&trade);
+                        // TODO send over WSS
+                        send_exchange_response(
+                            sender_peer_id,
+                            request_id,
+                            self.network_client.clone(),
+                            ExchangeResponse::Ack,
+                        );
 
-                            // is_requester = false, since node is provider
-                            self.storage.add_new_trade(query, bid, false);
+                        // // Received StartCommit from Provider for AcceptedBid on a published
+                        // // Query by the Node (i.e. Requester). Thus, Trade object should exist
+                        // // for the given query id with provider id as sender id.
+                        // if let Ok(mut trade) = self
+                        //     .storage
+                        //     .find_active_trade(
+                        //         &query_id,
+                        //         // request sender should be the provider in the trade
+                        //         &sender_peer_id,
+                        //         &self.keypair.public().to_peer_id(),
+                        //     )
+                        //     .and_then(|trade| {
+                        //         if trade.status == TradeStatus::WaitingStartCommit {
+                        //             Ok(trade)
+                        //         } else {
+                        //             Err(anyhow::anyhow!("Invalid request"))
+                        //         }
+                        //     })
+                        // {
+                        //     debug!(
+                        //         "StartCommit request received for query_id {} from provider_id {}",
+                        //         query_id, sender_peer_id
+                        //     );
 
-                            send_dse_response(
-                                request_id,
-                                self.network_client.clone(),
-                                DseMessageResponse::Ack,
-                            );
+                        //     // update waiting status to RSendT1Commit
+                        //     trade.update_status(TradeStatus::RSendT1Commit);
+                        //     _ = self.storage.update_active_trade(trade);
 
-                            // TODO inform clients over WSS
-                        } else {
-                            send_dse_response(
-                                request_id,
-                                self.network_client.clone(),
-                                DseMessageResponse::Bad,
-                            );
-                            // TODO send bad response
-                        }
+                        //     send_dse_response(
+                        //         request_id,
+                        //         self.network_client.clone(),
+                        //         DseMessageResponse::Ack,
+                        //     );
+                        // } else {
+                        //     send_dse_response(
+                        //         request_id,
+                        //         self.network_client.clone(),
+                        //         DseMessageResponse::Bad,
+                        //     );
+                        // }
                     }
-                    DseMessageRequest::StartCommit { query_id } => {
-                        // Received StartCommit from Provider for AcceptedBid on a published
-                        // Query by the Node (i.e. Requester). Thus, Trade object should exist
-                        // for the given query id with provider id as sender id.
-                        if let Ok(mut trade) = self
-                            .storage
-                            .find_active_trade(
-                                &query_id,
-                                // request sender should be the provider in the trade
-                                &sender_peer_id,
-                                &self.keypair.public().to_peer_id(),
-                            )
-                            .and_then(|trade| {
-                                if trade.status == TradeStatus::WaitingStartCommit {
+                    ExchangeRequest::T1RequesterCommit { trade_id, commit } => {
+                        if let Ok(trade) =
+                            self.storage.find_active_trade(&trade_id).and_then(|trade| {
+                                if trade.status == TradeStatus::WaitingRT1Commit
+                                    && trade.counter_party_details().0 == sender_peer_id
+                                {
                                     Ok(trade)
                                 } else {
                                     Err(anyhow::anyhow!("Invalid request"))
@@ -256,50 +307,8 @@ impl Indexer {
                             })
                         {
                             debug!(
-                                "StartCommit request received for query_id {} from provider_id {}",
-                                query_id, sender_peer_id
-                            );
-
-                            // update waiting status to RSendT1Commit
-                            trade.update_status(TradeStatus::RSendT1Commit);
-                            _ = self.storage.update_active_trade(trade);
-
-                            send_dse_response(
-                                request_id,
-                                self.network_client.clone(),
-                                DseMessageResponse::Ack,
-                            );
-                        } else {
-                            send_dse_response(
-                                request_id,
-                                self.network_client.clone(),
-                                DseMessageResponse::Bad,
-                            );
-                        }
-                    }
-                    DseMessageRequest::T1RequesterCommit { query_id, commit } => {
-                        // Received T1 Commit from the requester. That means Trade with Node as
-                        // Provider and Peer as Requester exists, and TradeStatus is WaitingRT1Commit
-                        // Note - This request is only valid if Provider's Trade status is WaitingRT1Commit
-                        if let Ok(trade) = self
-                            .storage
-                            .find_active_trade(
-                                &query_id,
-                                &self.keypair.public().to_peer_id(),
-                                // requester sender should be requester in the trade
-                                &sender_peer_id,
-                            )
-                            .and_then(|trade| {
-                                if trade.status == TradeStatus::WaitingRT1Commit {
-                                    Ok(trade)
-                                } else {
-                                    Err(anyhow::anyhow!("Invalid request"))
-                                }
-                            })
-                        {
-                            debug!(
-                                "T1RequesterCommit request received for query_id {} from requester_id {}",
-                                query_id, sender_peer_id
+                                "T1RequesterCommit request received for trade id {} from requester id {}",
+                                trade_id, sender_peer_id
                             );
 
                             // In verify fn of commit procedure
@@ -317,32 +326,29 @@ impl Indexer {
                                 proc.verify(commit).await;
                             });
 
-                            send_dse_response(
+                            send_exchange_response(
+                                sender_peer_id,
                                 request_id,
                                 self.network_client.clone(),
-                                DseMessageResponse::Ack,
+                                ExchangeResponse::Ack,
                             );
                         } else {
-                            send_dse_response(
+                            send_exchange_response(
+                                sender_peer_id,
                                 request_id,
                                 self.network_client.clone(),
-                                DseMessageResponse::Bad,
+                                ExchangeResponse::Bad,
                             );
                         }
                     }
-                    DseMessageRequest::T1ProviderCommit { query_id, commit } => {
+                    ExchangeRequest::T1ProviderCommit { trade_id, commit } => {
                         // Received T1 Commit from provider. Therefore, TradeStatus of the node
                         // (i.e. Requester) should be WaitingPT1Commit
-                        if let Ok(trade) = self
-                            .storage
-                            .find_active_trade(
-                                &query_id,
-                                // request sender is provider
-                                &sender_peer_id,
-                                &self.keypair.public().to_peer_id(),
-                            )
-                            .and_then(|trade| {
-                                if trade.status == TradeStatus::WaitingPT1Commit {
+                        if let Ok(trade) =
+                            self.storage.find_active_trade(&trade_id).and_then(|trade| {
+                                if trade.status == TradeStatus::WaitingPT1Commit
+                                    && trade.counter_party_details().0 == sender_peer_id
+                                {
                                     Ok(trade)
                                 } else {
                                     Err(anyhow::anyhow!("Invlaid request"))
@@ -350,8 +356,8 @@ impl Indexer {
                             })
                         {
                             debug!(
-                                "T1ProviderCommit request received for query_id {} from provider_id {}",
-                                query_id, sender_peer_id
+                                "T1ProviderCommit request received for trade id {} from provider id {}",
+                                trade_id, sender_peer_id
                             );
 
                             let proc = commit_procedure::CommitProcedure::new(
@@ -365,31 +371,28 @@ impl Indexer {
                                 proc.verify(commit).await;
                             });
 
-                            send_dse_response(
+                            send_exchange_response(
+                                sender_peer_id,
                                 request_id,
                                 self.network_client.clone(),
-                                DseMessageResponse::Ack,
+                                ExchangeResponse::Ack,
                             );
                         } else {
-                            send_dse_response(
+                            send_exchange_response(
+                                sender_peer_id,
                                 request_id,
                                 self.network_client.clone(),
-                                DseMessageResponse::Bad,
+                                ExchangeResponse::Bad,
                             );
                         }
                     }
-                    DseMessageRequest::T2RequesterCommit { query_id, commit } => {
+                    ExchangeRequest::T2RequesterCommit { trade_id, commit } => {
                         // Received T2 Commit from requester.
-                        if let Ok(trade) = self
-                            .storage
-                            .find_active_trade(
-                                &query_id,
-                                &self.keypair.public().to_peer_id(),
-                                // request sender should be requester
-                                &sender_peer_id,
-                            )
-                            .and_then(|trade| {
-                                if trade.status == TradeStatus::WaitingRT2Commit {
+                        if let Ok(trade) =
+                            self.storage.find_active_trade(&trade_id).and_then(|trade| {
+                                if trade.status == TradeStatus::WaitingRT2Commit
+                                    && trade.counter_party_details().0 == sender_peer_id
+                                {
                                     Ok(trade)
                                 } else {
                                     Err(anyhow::anyhow!("Invlaid request"))
@@ -397,8 +400,8 @@ impl Indexer {
                             })
                         {
                             debug!(
-                                "T2RequesterCommit request received for query_id {} from requester_id {}",
-                                query_id, sender_peer_id
+                                "T2RequesterCommit request received for trade id {} from requester id {}",
+                                trade_id, sender_peer_id
                             );
 
                             let proc = commit_procedure::CommitProcedure::new(
@@ -412,30 +415,44 @@ impl Indexer {
                                 proc.verify(commit).await;
                             });
 
-                            send_dse_response(
+                            send_exchange_response(
+                                sender_peer_id,
                                 request_id,
                                 self.network_client.clone(),
-                                DseMessageResponse::Ack,
+                                ExchangeResponse::Ack,
                             );
                         } else {
-                            send_dse_response(
+                            send_exchange_response(
+                                sender_peer_id,
                                 request_id,
                                 self.network_client.clone(),
-                                DseMessageResponse::Bad,
+                                ExchangeResponse::Bad,
                             );
                         }
                     }
-                    DseMessageRequest::CommitHistory(CommitHistoryRequest::WantHistory {
+                    _ => {}
+                }
+            }
+            NetworkEvent::CommitRequest {
+                sender_peer_id,
+                request_id,
+                request,
+            } => {
+                match request {
+                    CommitRequest::Update {
                         wallet_address,
-                    }) => {
+                        commits,
+                        last_batch,
+                    } => {
                         if let Some(commit_history) =
                             self.storage.find_commit_history(&wallet_address)
                         {
                             // send Ack
-                            send_dse_response(
+                            send_commit_response(
+                                sender_peer_id,
                                 request_id,
                                 self.network_client.clone(),
-                                DseMessageResponse::Ack,
+                                CommitResponse::Ack,
                             );
 
                             // FIXME: There are lot of things wrong here -
@@ -445,25 +462,24 @@ impl Indexer {
                             // to handle sending CommitHistory to a peer.
                             let nc = self.network_client.clone();
                             tokio::spawn(async move {
-                                nc.send_dse_message_request(
+                                nc.send_commit_request(
                                     sender_peer_id,
-                                    DseMessageRequest::CommitHistory(
-                                        CommitHistoryRequest::Update {
-                                            wallet_address,
-                                            commits: commit_history.commits,
-                                            last_batch: true,
-                                        },
-                                    ),
+                                    CommitRequest::Update {
+                                        wallet_address,
+                                        commits: commit_history.commits,
+                                        last_batch: true,
+                                    },
                                 )
                                 .await;
                             });
                         } else {
                             // Commit history does not exists
                             // send back bad response
-                            send_dse_response(
+                            send_commit_response(
+                                sender_peer_id,
                                 request_id,
                                 self.network_client.clone(),
-                                DseMessageResponse::Bad,
+                                CommitResponse::Bad,
                             );
                         }
                     }
@@ -475,14 +491,28 @@ impl Indexer {
     }
 }
 
-fn send_dse_response(
+fn send_exchange_response(
+    peer_id: PeerId,
     request_id: RequestId,
     mut network_client: network_client::Client,
-    response: network::DseMessageResponse,
+    response: ExchangeResponse,
 ) {
     tokio::spawn(async move {
         let _ = network_client
-            .send_dse_message_response(request_id, response)
+            .send_exchange_response(peer_id, request_id, response)
+            .await;
+    });
+}
+
+fn send_commit_response(
+    peer_id: PeerId,
+    request_id: RequestId,
+    mut network_client: network_client::Client,
+    response: CommitResponse,
+) {
+    tokio::spawn(async move {
+        let _ = network_client
+            .send_commit_response(peer_id, request_id, response)
             .await;
     });
 }

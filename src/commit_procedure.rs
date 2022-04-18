@@ -1,8 +1,8 @@
 use super::ch_request;
-use super::ethnode::EthNode;
-use super::network::DseMessageRequest;
 use super::network_client;
 use super::storage::{self, TradeStatus};
+use crate::ethnode::EthNode;
+use crate::network::ExchangeRequest;
 use log::error;
 use std::sync::Arc;
 use tokio::{sync::mpsc, time};
@@ -17,8 +17,8 @@ pub struct CommitProcedure {
 }
 
 pub enum CommitProcedureEvent {
-    SendSuccess { query_id: storage::QueryId },
-    SendFailed { query_id: storage::QueryId },
+    SendSuccess { trade_id: u32 },
+    SendFailed { trade_id: u32 },
 }
 
 impl CommitProcedure {
@@ -96,29 +96,24 @@ impl CommitProcedure {
         // interval.tick().await;
     }
 
-    /// Used for sending commits to peer for a trade
+    /// Used for sending commits to peer for a trade  
     ///
     /// Should make sure that trade is in send status
     /// before calling this
     pub async fn send(mut self) {
-        // Indexer makes sure that self.trade
+        // Before calling `send` make sure that self.trade
         // is in valid send state
         let commit = self
             .find_commitment()
             .expect("Invalid state OR failed to find valid commit");
 
         // send commit to peer
-        let peer_id = if self.trade.is_requester {
-            self.trade.bid.provider_id
-        } else {
-            self.trade.query.requester_id
-        };
         match self
             .network_client
-            .send_dse_message_request(
-                peer_id,
+            .send_exchange_request(
+                self.trade.counter_party_details().0,
                 self.create_send_request(commit)
-                    .expect("Invalid trade state"),
+                    .expect("Trade status isn't SOMETHING SEND"),
             )
             .await
         {
@@ -128,7 +123,7 @@ impl CommitProcedure {
 
                 self.event_sender
                     .send(CommitProcedureEvent::SendSuccess {
-                        query_id: self.trade.query_id,
+                        trade_id: self.trade.id,
                     })
                     .await;
             }
@@ -136,7 +131,7 @@ impl CommitProcedure {
                 let _ = self
                     .event_sender
                     .send(CommitProcedureEvent::SendFailed {
-                        query_id: self.trade.query_id,
+                        trade_id: self.trade.id,
                     })
                     .await;
             }
@@ -168,18 +163,18 @@ impl CommitProcedure {
 
     /// Creates DseMessageRequest that should be send
     /// according to trade status
-    fn create_send_request(&self, commit: storage::Commit) -> Option<DseMessageRequest> {
+    fn create_send_request(&self, commit: storage::Commit) -> Option<ExchangeRequest> {
         match self.trade.status {
-            TradeStatus::RSendT1Commit => Some(DseMessageRequest::T1RequesterCommit {
-                query_id: self.trade.query_id,
+            TradeStatus::RSendT1Commit => Some(ExchangeRequest::T1RequesterCommit {
+                trade_id: self.trade.id,
                 commit,
             }),
-            TradeStatus::PSendT1Commit => Some(DseMessageRequest::T1ProviderCommit {
-                query_id: self.trade.query_id,
+            TradeStatus::PSendT1Commit => Some(ExchangeRequest::T1ProviderCommit {
+                trade_id: self.trade.id,
                 commit,
             }),
-            TradeStatus::RSendT2Commit => Some(DseMessageRequest::T2RequesterCommit {
-                query_id: self.trade.query_id,
+            TradeStatus::RSendT2Commit => Some(ExchangeRequest::T2RequesterCommit {
+                trade_id: self.trade.id,
                 commit,
             }),
             _ => None,

@@ -7,6 +7,7 @@ use log::{debug, error, info};
 use structopt::StructOpt;
 use tokio::select;
 
+mod ch_request;
 mod commit_procedure;
 mod ethnode;
 mod indexer;
@@ -14,7 +15,6 @@ mod network;
 mod network_client;
 mod server;
 mod storage;
-mod ch_request;
 
 #[derive(Debug, StructOpt)]
 #[structopt(name = "DSE args")]

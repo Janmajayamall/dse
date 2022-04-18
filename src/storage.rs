@@ -131,6 +131,12 @@ pub struct BidData {
     charge: ethers::types::U256,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TradeQuote {
+    pub charge: ethers::types::U256,
+    pub id: u32,
+}
+
 #[derive(Deserialize, Serialize, Debug, Clone, PartialEq)]
 pub struct Bid {
     pub query_id: QueryId,
@@ -164,9 +170,11 @@ impl Bid {
 #[derive(Deserialize, Serialize, Debug, PartialEq, Clone)]
 pub enum TradeStatus {
     /// Provider should send StartCommit
+    /// /// FIXME: Not needed anymore
     PSendStartCommit,
     /// Requester is waiting for Start Commit
     /// from provider
+    /// FIXME: Not needed anymore
     WaitingStartCommit,
     /// Provider is waiting for Requester's T1
     /// Commit
@@ -205,14 +213,18 @@ pub enum TradeStatus {
 /// node and some peer
 #[derive(Deserialize, Serialize, Debug, Clone)]
 pub struct Trade {
-    /// Trade query
-    pub query: Query,
-    /// Trade bid (accepted by requester)
-    pub bid: Bid,
+    pub id: u32,
+
+    pub requester_addr: Multiaddr,
+    pub requester_id: PeerId,
+
+    pub provider_addr: Multiaddr,
+    pub provider_id: PeerId,
+
+    pub charge: U256,
+
     /// Status of the trade
     pub status: TradeStatus,
-    /// Query id
-    pub query_id: QueryId,
     /// Flag whether node is requester
     /// OR provider
     pub is_requester: bool,
@@ -220,19 +232,27 @@ pub struct Trade {
 
 impl Trade {
     pub fn t1CommitAmount(&self) -> U256 {
-        self.bid.charge.div_mod(U256::from_dec_str("2").unwrap()).0
+        self.charge.div_mod(U256::from_dec_str("2").unwrap()).0
     }
 
     pub fn t2CommitAmount(&self) -> U256 {
-        self.bid.charge
+        self.charge
     }
 
     pub fn update_status(&mut self, to: TradeStatus) {
         debug!(
-            "Updated trade status for query_id {} from {:?} to {:?}",
-            self.query_id, self.status, to
+            "Updated trade status for id {} from {:?} to {:?}",
+            self.id, self.status, to
         );
         self.status = to;
+    }
+
+    pub fn counter_party_details(&self) -> (PeerId, Multiaddr) {
+        if self.is_requester {
+            (self.provider_id, self.provider_addr)
+        } else {
+            (self.requester_id, self.requester_addr)
+        }
     }
 
     /// Returns true if trade status is SOMETHING
@@ -242,6 +262,28 @@ impl Trade {
         self.status == TradeStatus::RSendT1Commit
             || self.status == TradeStatus::PSendT1Commit
             || self.status == TradeStatus::RSendT2Commit
+    }
+
+    pub async fn from_quote(
+        quote: TradeQuote,
+        i_want: IWant,
+        status: TradeStatus,
+        mut network_client: network_client::Client,
+        is_requester: bool,
+    ) -> anyhow::Result<Self> {
+        network_client
+            .network_details()
+            .await
+            .map(|(node_id, node_addr)| Trade {
+                id: quote.id,
+                requester_addr: i_want.requester_addr,
+                requester_id: i_want.requester_id,
+                provider_addr: node_addr,
+                provider_id: node_id,
+                charge: quote.charge,
+                status,
+                is_requester,
+            })
     }
 }
 
@@ -361,6 +403,9 @@ const T2_COMMITS_RECEIVED: &[u8] = b"t2-commits-received";
 
 const COMMIT_HISTORY: &[u8] = b"commit-history";
 
+const START_COMMITS: &[u8] = b"start-commits";
+const I_WANTS: &[u8] = b"i-wants";
+
 pub struct Storage {
     /// Stores all graphs
     ///
@@ -369,6 +414,13 @@ pub struct Storage {
     db: Mutex<Db>,
     /// ID counter of clients
     client_id_counter: AtomicUsize,
+}
+
+#[derive(Deserialize, Serialize, Debug, Clone, PartialEq)]
+pub struct IWant {
+    requester_id: PeerId,
+    requester_addr: Multiaddr,
+    id: u32,
 }
 
 impl Storage {
@@ -381,6 +433,24 @@ impl Storage {
             db: Mutex::new(config.open().expect("Failed to open main db")),
             client_id_counter: AtomicUsize::new(1),
         }
+    }
+
+    /// Stores newly received `IWANT` messge from requester
+    pub fn add_i_want(&self, msg: &IWant) {
+        let mut db = self.db.lock().unwrap();
+        let tree = db.open_tree(I_WANTS).expect("db: failed to open tree");
+        tree.insert(msg.id.to_be_bytes(), bincode::serialize(&msg).unwrap());
+    }
+
+    /// Stores `Trade`  received from provider
+    pub fn add_active_trade(&self, msg: &Trade) {
+        let mut db = self.db.lock().unwrap();
+
+        let tree = db
+            .open_tree(ACTIVE_TRADES)
+            .expect("db: failed to open tree");
+
+        tree.insert(msg.id.to_be_bytes(), bincode::serialize(&msg).unwrap());
     }
 
     /// Adds newly received bid to query's
@@ -436,30 +506,13 @@ impl Storage {
         queries.insert(query.id.to_be_bytes(), bincode::serialize(&query).unwrap());
     }
 
-    /// Adds new trade for a query and a bid
-    ///
-    /// Call after requester accepts the bid
-    ///
-    /// FIXME: Having query id as key for trade, restricts
-    /// having one trade per query. Not a restriction that
-    /// is needed.
-    pub fn add_new_trade(&self, query: Query, bid: Bid, is_requester: bool) {
+    /// Stores new trade
+    pub fn add_new_trade(&self, trade: Trade) {
         let db = self.db.lock().unwrap();
         let trades = db
             .open_tree(ACTIVE_TRADES)
             .expect("db: failed to open tree");
-        let trade = Trade {
-            query: query.clone(),
-            bid,
-            status: if is_requester {
-                TradeStatus::WaitingStartCommit
-            } else {
-                TradeStatus::PSendStartCommit
-            },
-            query_id: query.id,
-            is_requester,
-        };
-        trades.insert(query.id.to_be_bytes(), bincode::serialize(&trade).unwrap());
+        trades.insert(trade.id.to_be_bytes(), bincode::serialize(&trade).unwrap());
     }
 
     /// Adds new commit to the commit history
@@ -493,19 +546,11 @@ impl Storage {
     ///
     /// Returns err if Trade does not pre-exists.
     pub fn update_active_trade(&self, trade: Trade) -> anyhow::Result<()> {
-        self.find_active_trade(
-            &trade.query_id,
-            &trade.bid.provider_id,
-            &trade.query.requester_id,
-        )
-        .and_then(|_| {
+        self.find_active_trade(&trade.id).and_then(|_| {
             let mut db = self.db.lock().unwrap();
             db.open_tree(ACTIVE_TRADES)
                 .expect("db: failed to open tree")
-                .insert(
-                    trade.query_id.to_be_bytes(),
-                    bincode::serialize(&trade).unwrap(),
-                )
+                .insert(trade.id.to_be_bytes(), bincode::serialize(&trade).unwrap())
                 .map(|_| ())
                 .map_err(anyhow::Error::from)
         })
@@ -622,6 +667,24 @@ impl Storage {
             )
     }
 
+    /// Finds I wants
+    pub fn find_i_want(&self, iid: &u32) -> Option<IWant> {
+        let mut db = self.db.lock().unwrap();
+        let tree = db.open_tree(I_WANTS).expect("db: failed to open tree");
+        tree.iter()
+            .find(|res| {
+                if let Ok((id, val)) = res {
+                    *id == iid.to_be_bytes()
+                } else {
+                    false
+                }
+            })
+            .map_or_else(
+                || None,
+                |val| Some(bincode::deserialize::<IWant>(&val.unwrap().1).unwrap()),
+            )
+    }
+
     /// Finds query received by query id
     pub fn find_query_received_by_query_id(&self, query_id: &QueryId) -> anyhow::Result<Query> {
         let mut db = self.db.lock().unwrap();
@@ -689,12 +752,7 @@ impl Storage {
     }
 
     /// Find trade by query id & provider id & requester id
-    pub fn find_active_trade(
-        &self,
-        query_id: &QueryId,
-        provider_id: &PeerId,
-        requester_id: &PeerId,
-    ) -> anyhow::Result<Trade> {
+    pub fn find_active_trade(&self, iid: &u32) -> anyhow::Result<Trade> {
         let mut db = self.db.lock().unwrap();
         let trades = db
             .open_tree(ACTIVE_TRADES)
@@ -702,14 +760,8 @@ impl Storage {
         trades
             .iter()
             .find(|res| {
-                if let Ok(Ok(flag)) = res.to_owned().map(|(_, val)| {
-                    bincode::deserialize::<Trade>(&val).map(|trade| {
-                        trade.query_id == *query_id
-                            && trade.bid.provider_id == *provider_id
-                            && trade.query.requester_id == *requester_id
-                    })
-                }) {
-                    flag
+                if let Ok((id, _)) = res {
+                    *id == iid.to_be_bytes()
                 } else {
                     false
                 }

@@ -1,6 +1,6 @@
 use async_std::channel;
 use futures_util::{SinkExt, StreamExt, TryFutureExt};
-use libp2p::{identity::Keypair, PeerId};
+use libp2p::{identity::Keypair, Multiaddr, PeerId};
 use log::{debug, error, info};
 use serde::{Deserialize, Serialize};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -60,7 +60,14 @@ pub enum ReceivedMessage {
     },
 
     /// received start commit from client
-    StartCommit { query_id: storage::QueryId },
+    StartCommit { trade_quote: storage::TradeQuote },
+
+    /// send IWant to provider
+    IWant {
+        provider_addr: Multiaddr,
+        provider_id: PeerId,
+        id: u32,
+    },
 }
 
 #[derive(Clone)]
@@ -184,134 +191,202 @@ async fn handle_post(
         ReceivedMessage::PlaceBid { bid } => {
             // FIXME: Switch to chaining
 
-            match storage::Bid::from_data(
-                bid,
-                server.network_client.clone(),
-                server.ethnode.timelocked_wallet,
-            )
-            .await
-            {
-                Ok(bid) => {
-                    // Check that query for which the bid is received was received
-                    // before over p2p network
-                    if let Ok(query) = server
-                        .storage
-                        .find_query_received_by_query_id(&bid.query_id)
-                    {
-                        match server
-                            .network_client
-                            .send_dse_message_request(
-                                query.requester_id,
-                                network::DseMessageRequest::PlaceBid {
-                                    query_id: query.id,
-                                    bid: bid.clone(),
-                                },
-                            )
-                            .await
-                        {
-                            Ok(network::DseMessageResponse::Ack) => {
-                                debug!("Placed bid for query id {}", query.id);
+            // match storage::Bid::from_data(
+            //     bid,
+            //     server.network_client.clone(),
+            //     server.ethnode.timelocked_wallet,
+            // )
+            // .await
+            // {
+            //     Ok(bid) => {
+            //         // Check that query for which the bid is received was received
+            //         // before over p2p network
+            //         if let Ok(query) = server
+            //             .storage
+            //             .find_query_received_by_query_id(&bid.query_id)
+            //         {
+            //             match server
+            //                 .network_client
+            //                 .send_exchange_request(
+            //                     query.requester_id,
+            //                     network::DseMessageRequest::PlaceBid {
+            //                         query_id: query.id,
+            //                         bid: bid.clone(),
+            //                     },
+            //                 )
+            //                 .await
+            //             {
+            //                 Ok(network::DseMessageResponse::Ack) => {
+            //                     debug!("Placed bid for query id {}", query.id);
 
-                                // store bid
-                                server.storage.add_bid_sent_for_query(bid, query);
+            //                     // store bid
+            //                     server.storage.add_bid_sent_for_query(bid, query);
 
-                                Ok(Box::new(http::StatusCode::OK))
-                            }
-                            _ => Ok(Box::new(http::StatusCode::INTERNAL_SERVER_ERROR)),
-                        }
-                    } else {
-                        Ok(Box::new(http::StatusCode::INTERNAL_SERVER_ERROR))
-                    }
-                }
-                Err(_) => Ok(Box::new(http::StatusCode::INTERNAL_SERVER_ERROR)),
-            }
+            //                     Ok(Box::new(http::StatusCode::OK))
+            //                 }
+            //                 _ => Ok(Box::new(http::StatusCode::INTERNAL_SERVER_ERROR)),
+            //             }
+            //         } else {
+            //             Ok(Box::new(http::StatusCode::INTERNAL_SERVER_ERROR))
+            //         }
+            //     }
+            //     Err(_) => Ok(Box::new(http::StatusCode::INTERNAL_SERVER_ERROR)),
+            // }
+
+            Ok(Box::new(http::StatusCode::INTERNAL_SERVER_ERROR))
         }
         ReceivedMessage::AcceptBid {
             query_id,
             provider_id,
         } => {
             // Check that bid was received by the node (i.e. Requester)
-            if let Ok(Ok((query, bid))) = server
-                .storage
-                .find_bid_received(&query_id, &provider_id)
-                .map(|bid| {
-                    // Find query sent for which the bid was receiveds
-                    server
-                        .storage
-                        .find_query_sent_by_query_id(&query_id)
-                        .map(|query| (query, bid))
-                })
+            // if let Ok(Ok((query, bid))) = server
+            //     .storage
+            //     .find_bid_received(&query_id, &provider_id)
+            //     .map(|bid| {
+            //         // Find query sent for which the bid was receiveds
+            //         server
+            //             .storage
+            //             .find_query_sent_by_query_id(&query_id)
+            //             .map(|query| (query, bid))
+            //     })
+            // {
+            //     match server
+            //         .network_client
+            //         .send_dse_message_request(
+            //             bid.provider_id,
+            //             network::DseMessageRequest::AcceptBid { query_id },
+            //         )
+            //         .await
+            //     {
+            //         Ok(network::DseMessageResponse::Ack) => {
+            //             debug!(
+            //                 "Accepted bid from provider_id {} for query id {}",
+            //                 provider_id, query.id
+            //             );
+            //             server.storage.add_new_trade(query, bid, true);
+            //             Ok(Box::new(http::StatusCode::OK))
+            //         }
+            //         Err(_) => Ok(Box::new(http::StatusCode::INTERNAL_SERVER_ERROR)),
+            //         _ => Ok(Box::new(http::StatusCode::INTERNAL_SERVER_ERROR)),
+            //     }
+            // } else {
+            //     Ok(Box::new(http::StatusCode::INTERNAL_SERVER_ERROR))
+            // }
+            Ok(Box::new(http::StatusCode::INTERNAL_SERVER_ERROR))
+        }
+        ReceivedMessage::IWant {
+            provider_addr,
+            provider_id,
+            id,
+        } => {
+            if let Ok(i_want) =
+                server
+                    .network_client
+                    .network_details()
+                    .await
+                    .map(|(node_id, node_addr)| storage::IWant {
+                        requester_addr: node_addr,
+                        requester_id: node_id,
+                        id,
+                    })
             {
                 match server
                     .network_client
-                    .send_dse_message_request(
-                        bid.provider_id,
-                        network::DseMessageRequest::AcceptBid { query_id },
-                    )
+                    .send_exchange_request(provider_id, network::ExchangeRequest::IWant { i_want })
                     .await
                 {
-                    Ok(network::DseMessageResponse::Ack) => {
-                        debug!(
-                            "Accepted bid from provider_id {} for query id {}",
-                            provider_id, query.id
-                        );
-                        server.storage.add_new_trade(query, bid, true);
-                        Ok(Box::new(http::StatusCode::OK))
-                    }
-                    Err(_) => Ok(Box::new(http::StatusCode::INTERNAL_SERVER_ERROR)),
+                    Ok(network::ExchangeResponse::Ack) => Ok(Box::new(http::StatusCode::OK)),
                     _ => Ok(Box::new(http::StatusCode::INTERNAL_SERVER_ERROR)),
                 }
             } else {
                 Ok(Box::new(http::StatusCode::INTERNAL_SERVER_ERROR))
             }
         }
-        ReceivedMessage::StartCommit { query_id } => {
-            // Check that Trade corresponding to query_id exists
-            // since node (Provider) should have received AcceptBid from
-            // Requester.
-            // Make sure that status of Trade is PSendStartCommit
-            if let Ok(mut trade) = server
-                .storage
-                .find_query_received_by_query_id(&query_id)
-                .and_then(|query| {
-                    server
-                        .storage
-                        .find_active_trade(
-                            &query_id,
-                            &server.keypair.public().to_peer_id(),
-                            &query.requester_id,
-                        )
-                        .and_then(|trade| {
-                            if trade.status == storage::TradeStatus::PSendStartCommit {
-                                Ok(trade)
-                            } else {
-                                Err(anyhow::anyhow!("Invalid trade status"))
-                            }
-                        })
-                })
-            {
-                match server
-                    .network_client
-                    .send_dse_message_request(
-                        trade.query.requester_id,
-                        network::DseMessageRequest::StartCommit { query_id },
-                    )
-                    .await
+        ReceivedMessage::StartCommit { trade_quote } => {
+            if let Some(mut i_want) = server.storage.find_i_want(&trade_quote.id) {
+                match storage::Trade::from_quote(
+                    trade_quote,
+                    i_want,
+                    storage::TradeStatus::WaitingRT1Commit,
+                    server.network_client.clone(),
+                    false,
+                )
+                .await
                 {
-                    Ok(network::DseMessageResponse::Ack) => {
-                        debug!("Sent StartCommit to requester for query_id {}", query_id);
+                    Ok(mut trade) => {
+                        match server
+                            .network_client
+                            .send_exchange_request(
+                                trade.requester_id.clone(),
+                                network::ExchangeRequest::StartCommit {
+                                    trade: trade.clone(),
+                                },
+                            )
+                            .await
+                        {
+                            Ok(network::ExchangeResponse::Ack) => {
+                                debug!("Sent StartCommit to requester for trade id {}", trade.id);
 
-                        // update trade status to WaitingRT1Commit
-                        trade.update_status(storage::TradeStatus::WaitingRT1Commit);
-                        server.storage.update_active_trade(trade);
+                                server.storage.add_active_trade(&trade);
 
-                        Ok(Box::new(http::StatusCode::OK))
+                                Ok(Box::new(http::StatusCode::OK))
+                            }
+                            _ => Ok(Box::new(http::StatusCode::INTERNAL_SERVER_ERROR)),
+                        }
                     }
-                    _ => Ok(Box::new(http::StatusCode::INTERNAL_SERVER_ERROR)),
+                    Err(e) => Ok(Box::new(http::StatusCode::INTERNAL_SERVER_ERROR)),
                 }
             } else {
                 Ok(Box::new(http::StatusCode::INTERNAL_SERVER_ERROR))
             }
+
+            // Check that Trade corresponding to query_id exists
+            // since node (Provider) should have received AcceptBid from
+            // Requester.
+            // Make sure that status of Trade is PSendStartCommit
+            // if let Ok(mut trade) = server
+            //     .storage
+            //     .find_query_received_by_query_id(&query_id)
+            //     .and_then(|query| {
+            //         server
+            //             .storage
+            //             .find_active_trade(
+            //                 &query_id,
+            //                 &server.keypair.public().to_peer_id(),
+            //                 &query.requester_id,
+            //             )
+            //             .and_then(|trade| {
+            //                 if trade.status == storage::TradeStatus::PSendStartCommit {
+            //                     Ok(trade)
+            //                 } else {
+            //                     Err(anyhow::anyhow!("Invalid trade status"))
+            //                 }
+            //             })
+            //     })
+            // {
+            //     match server
+            //         .network_client
+            //         .send_dse_message_request(
+            //             trade.query.requester_id,
+            //             network::DseMessageRequest::StartCommit { query_id },
+            //         )
+            //         .await
+            //     {
+            //         Ok(network::DseMessageResponse::Ack) => {
+            //             debug!("Sent StartCommit to requester for query_id {}", query_id);
+
+            //             // update trade status to WaitingRT1Commit
+            //             trade.update_status(storage::TradeStatus::WaitingRT1Commit);
+            //             server.storage.update_active_trade(trade);
+
+            //             Ok(Box::new(http::StatusCode::OK))
+            //         }
+            //         _ => Ok(Box::new(http::StatusCode::INTERNAL_SERVER_ERROR)),
+            //     }
+            // } else {
+            //     Ok(Box::new(http::StatusCode::INTERNAL_SERVER_ERROR))
+            // }
         }
         _ => Ok(Box::new(http::StatusCode::INTERNAL_SERVER_ERROR)),
     }

@@ -4,7 +4,7 @@ use libp2p::kad::{
     record, AddProviderOk, Addresses, BootstrapError, GetProvidersOk, GetRecordError, GetRecordOk,
     Kademlia, KademliaConfig, KademliaEvent, PutRecordOk, QueryId, QueryResult, Quorum, Record,
 };
-use libp2p::{gossipsub, request_response, Multiaddr, NetworkBehaviour, PeerId, Transport};
+use libp2p::{gossipsub, request_response::RequestId, Multiaddr, PeerId, Transport};
 use tokio::sync::{broadcast, mpsc, oneshot};
 
 // client & event loop for network
@@ -121,30 +121,66 @@ impl Client {
         receiver.await?
     }
 
-    pub async fn send_dse_message_request(
+    pub async fn send_exchange_request(
         &self,
         peer_id: PeerId,
-        message: network::DseMessageRequest,
-    ) -> Result<network::DseMessageResponse, anyhow::Error> {
+        request: network::ExchangeRequest,
+    ) -> Result<network::ExchangeResponse, anyhow::Error> {
         let (sender, receiver) = oneshot::channel();
         self.command_sender
-            .send(Command::SendDseMessageRequest {
+            .send(Command::SendExchangeRequest {
                 peer_id,
-                message,
+                request,
                 sender,
             })
             .await?;
         receiver.await?
     }
 
-    pub async fn send_dse_message_response(
+    pub async fn send_exchange_response(
         &mut self,
-        request_id: request_response::RequestId,
-        response: network::DseMessageResponse,
+        peer_id: PeerId,
+        request_id: RequestId,
+        response: network::ExchangeResponse,
     ) -> Result<(), anyhow::Error> {
         let (sender, receiver) = oneshot::channel();
         self.command_sender
-            .send(Command::SendDseMessageResponse {
+            .send(Command::SendExchangeResponse {
+                peer_id,
+                request_id,
+                response,
+                sender,
+            })
+            .await?;
+        receiver.await?
+    }
+
+    pub async fn send_commit_request(
+        &self,
+        peer_id: PeerId,
+        request: network::CommitRequest,
+    ) -> Result<network::CommitResponse, anyhow::Error> {
+        let (sender, receiver) = oneshot::channel();
+        self.command_sender
+            .send(Command::SendCommitRequest {
+                peer_id,
+                request,
+                sender,
+            })
+            .await?;
+        receiver.await?
+    }
+
+    pub async fn send_commit_response(
+        &mut self,
+        peer_id: PeerId,
+        request_id: RequestId,
+        response: network::CommitResponse,
+    ) -> Result<(), anyhow::Error> {
+        let (sender, receiver) = oneshot::channel();
+        self.command_sender
+            .send(Command::SendCommitResponse {
+                peer_id,
                 request_id,
                 response,
                 sender,

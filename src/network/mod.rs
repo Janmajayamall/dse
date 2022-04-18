@@ -1,3 +1,4 @@
+use super::storage;
 use async_std::prelude::StreamExt;
 use async_trait::async_trait;
 use futures::{AsyncRead, AsyncWrite};
@@ -23,8 +24,8 @@ use libp2p::mplex::MplexConfig;
 use libp2p::noise;
 use libp2p::ping::{self, Ping, PingConfig, PingEvent};
 use libp2p::request_response::{
-    self, ProtocolSupport, RequestResponse, RequestResponseCodec, RequestResponseEvent,
-    RequestResponseMessage,
+    ProtocolSupport, RequestId, RequestResponse, RequestResponseCodec, RequestResponseEvent,
+    RequestResponseMessage, ResponseChannel,
 };
 use libp2p::swarm::{ConnectionHandlerUpgrErr, SwarmBuilder, SwarmEvent};
 use libp2p::tcp::TokioTcpConfig;
@@ -34,12 +35,15 @@ use log::{debug, error, warn};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::convert::TryFrom;
-
 use std::time::Duration;
 use tokio::sync::{broadcast, mpsc, oneshot};
 use tokio::{io, select};
 
-use super::storage;
+mod commit;
+mod exchange;
+pub use commit::*;
+pub use exchange::*;
+mod request_response;
 
 #[derive(NetworkBehaviour)]
 #[behaviour(out_event = "BehaviourEvent")]
@@ -48,7 +52,8 @@ struct Behaviour {
     mdns: Mdns,
     ping: Ping,
     gossipsub: Gossipsub,
-    request_response: RequestResponse<DseMessageCodec>,
+    exchange: RequestResponse<ExchangeCodec>,
+    commit: RequestResponse<CommitCodec>,
 }
 
 impl Behaviour {
@@ -83,10 +88,15 @@ impl Behaviour {
         )
         .map_err(anyhow::Error::msg)?;
 
-        // request response
-        let request_response = RequestResponse::new(
-            DseMessageCodec(),
-            std::iter::once((DseMessageProtocol(), ProtocolSupport::Full)),
+        let exchange = RequestResponse::new(
+            ExchangeCodec::default(),
+            std::iter::once((ExchangeProtocol, ProtocolSupport::Full)),
+            Default::default(),
+        );
+
+        let commit = RequestResponse::new(
+            CommitCodec::default(),
+            std::iter::once((CommitProtocol, ProtocolSupport::Full)),
             Default::default(),
         );
 
@@ -95,7 +105,9 @@ impl Behaviour {
             mdns,
             ping,
             gossipsub,
-            request_response,
+
+            exchange,
+            commit,
         })
     }
 }
@@ -105,7 +117,9 @@ pub enum BehaviourEvent {
     Ping(PingEvent),
     Mdns(MdnsEvent),
     Gossipsub(GossipsubEvent),
-    RequestResponse(RequestResponseEvent<DseMessageRequest, DseMessageResponse>),
+
+    Exchange(RequestResponseEvent<ExchangeRequest, ExchangeResponse>),
+    Commit(RequestResponseEvent<CommitRequest, CommitResponse>),
 }
 
 impl From<KademliaEvent> for BehaviourEvent {
@@ -132,9 +146,15 @@ impl From<GossipsubEvent> for BehaviourEvent {
     }
 }
 
-impl From<RequestResponseEvent<DseMessageRequest, DseMessageResponse>> for BehaviourEvent {
-    fn from(event: RequestResponseEvent<DseMessageRequest, DseMessageResponse>) -> Self {
-        BehaviourEvent::RequestResponse(event)
+impl From<RequestResponseEvent<ExchangeRequest, ExchangeResponse>> for BehaviourEvent {
+    fn from(event: RequestResponseEvent<ExchangeRequest, ExchangeResponse>) -> Self {
+        BehaviourEvent::Exchange(event)
+    }
+}
+
+impl From<RequestResponseEvent<CommitRequest, CommitResponse>> for BehaviourEvent {
+    fn from(event: RequestResponseEvent<CommitRequest, CommitResponse>) -> Self {
+        BehaviourEvent::Commit(event)
     }
 }
 
@@ -190,19 +210,21 @@ pub struct Network {
         HashMap<QueryId, oneshot::Sender<Result<GetProvidersOk, anyhow::Error>>>,
     pending_add_peers: HashMap<PeerId, oneshot::Sender<Result<(), anyhow::Error>>>,
     pending_bootstrap_requests: HashMap<QueryId, oneshot::Sender<Result<(), anyhow::Error>>>,
-    // Pending result of outbound request. It returns DseMessageResponse
-    // which means the fn does not finishes until peer to which outcound request
-    // is sent, responds using channel or channel drops.
-    pending_dse_outbound_message_requests: HashMap<
-        request_response::RequestId,
-        oneshot::Sender<Result<DseMessageResponse, anyhow::Error>>,
-    >,
-    // Pending result of response sent to an inbound request
-    pending_dse_inbound_message_response:
-        HashMap<request_response::RequestId, oneshot::Sender<Result<(), anyhow::Error>>>,
-    // Stores response channels of an inbound request
-    response_channels_for_inbound_requests:
-        HashMap<request_response::RequestId, request_response::ResponseChannel<DseMessageResponse>>,
+
+    pending_exchange_outbound_requests:
+        HashMap<(PeerId, RequestId), oneshot::Sender<Result<ExchangeResponse, anyhow::Error>>>,
+    pending_commit_outbound_requests:
+        HashMap<(PeerId, RequestId), oneshot::Sender<Result<CommitResponse, anyhow::Error>>>,
+
+    pending_exchange_inbound_response:
+        HashMap<(PeerId, RequestId), oneshot::Sender<Result<(), anyhow::Error>>>,
+    pending_commit_inbound_response:
+        HashMap<(PeerId, RequestId), oneshot::Sender<Result<(), anyhow::Error>>>,
+
+    exchange_inbound_response_channels:
+        HashMap<(PeerId, RequestId), ResponseChannel<ExchangeResponse>>,
+    commit_inbound_response_channels: HashMap<(PeerId, RequestId), ResponseChannel<CommitResponse>>,
+
     // All known peers (FIX: Not needed anymore?)
     known_peers: HashMap<PeerId, Addresses>,
 }
@@ -275,9 +297,12 @@ impl Network {
             pending_dht_get_providers_requests: Default::default(),
             pending_add_peers: Default::default(),
             pending_bootstrap_requests: Default::default(),
-            pending_dse_outbound_message_requests: Default::default(),
-            pending_dse_inbound_message_response: Default::default(),
-            response_channels_for_inbound_requests: Default::default(),
+            pending_exchange_outbound_requests: Default::default(),
+            pending_commit_outbound_requests: Default::default(),
+            pending_exchange_inbound_response: Default::default(),
+            pending_commit_inbound_response: Default::default(),
+            exchange_inbound_response_channels: Default::default(),
+            commit_inbound_response_channels: Default::default(),
             known_peers: Default::default(),
         })
     }
@@ -343,9 +368,10 @@ impl Network {
                 peer_addr,
                 sender,
             } => {
+                // add peer for exchange protcol
                 self.swarm
                     .behaviour_mut()
-                    .request_response
+                    .exchange
                     .add_address(&peer_id, peer_addr.clone());
                 let _ = sender.send(());
                 debug!(
@@ -424,43 +450,81 @@ impl Network {
                     }
                 }
             }
-            Command::SendDseMessageResponse {
+            Command::SendExchangeResponse {
+                peer_id,
                 request_id,
                 response,
                 sender,
-            } => {
-                match self
-                    .response_channels_for_inbound_requests
-                    .remove(&request_id)
-                {
-                    Some(channel) => {
-                        self.swarm
-                            .behaviour_mut()
-                            .request_response
-                            .send_response(channel, response);
-                        self.pending_dse_inbound_message_response
-                            .insert(request_id, sender);
-                    }
-                    None => {
-                        sender.send(Err(anyhow::anyhow!(
-                            "Response channel is missing for inboud request with requst id: {}",
-                            request_id
-                        )));
-                    }
+            } => match self
+                .exchange_inbound_response_channels
+                .remove(&(peer_id, request_id))
+            {
+                Some(channel) => {
+                    self.swarm
+                        .behaviour_mut()
+                        .exchange
+                        .send_response(channel, response);
+                    self.pending_exchange_inbound_response
+                        .insert((peer_id, request_id), sender);
                 }
-            }
-            Command::SendDseMessageRequest {
+                None => {
+                    sender.send(Err(anyhow::anyhow!(
+                        "(exchange) response channel missing for requst id {} to peer {}",
+                        request_id,
+                        peer_id
+                    )));
+                }
+            },
+            Command::SendExchangeRequest {
                 peer_id,
-                message,
+                request,
                 sender,
             } => {
                 let request_id = self
                     .swarm
                     .behaviour_mut()
-                    .request_response
-                    .send_request(&peer_id, message);
-                self.pending_dse_outbound_message_requests
-                    .insert(request_id, sender);
+                    .exchange
+                    .send_request(&peer_id, request);
+                self.pending_exchange_outbound_requests
+                    .insert((peer_id, request_id), sender);
+            }
+            Command::SendCommitResponse {
+                peer_id,
+                request_id,
+                response,
+                sender,
+            } => match self
+                .commit_inbound_response_channels
+                .remove(&(peer_id, request_id))
+            {
+                Some(channel) => {
+                    self.swarm
+                        .behaviour_mut()
+                        .commit
+                        .send_response(channel, response);
+                    self.pending_commit_inbound_response
+                        .insert((peer_id, request_id), sender);
+                }
+                None => {
+                    sender.send(Err(anyhow::anyhow!(
+                        "(commit) response channel missing for requst id {} to peer {}",
+                        request_id,
+                        peer_id
+                    )));
+                }
+            },
+            Command::SendCommitRequest {
+                peer_id,
+                request,
+                sender,
+            } => {
+                let request_id = self
+                    .swarm
+                    .behaviour_mut()
+                    .commit
+                    .send_request(&peer_id, request);
+                self.pending_commit_outbound_requests
+                    .insert((peer_id, request_id), sender);
             }
             Command::NetworkDetails { sender } => match self.node_address.clone() {
                 Some(v) => {
@@ -484,8 +548,11 @@ impl Network {
             BehaviourEvent,
             EitherError<
                 EitherError<
-                    EitherError<EitherError<std::io::Error, void::Void>, ping::Failure>,
-                    GossipsubHandlerError,
+                    EitherError<
+                        EitherError<EitherError<std::io::Error, void::Void>, ping::Failure>,
+                        GossipsubHandlerError,
+                    >,
+                    ConnectionHandlerUpgrErr<std::io::Error>,
                 >,
                 ConnectionHandlerUpgrErr<std::io::Error>,
             >,
@@ -661,106 +728,199 @@ impl Network {
                     }
                 }
             }
-            SwarmEvent::Behaviour(BehaviourEvent::RequestResponse(
-                RequestResponseEvent::Message { peer, message },
-            )) => {
-                match message {
-                    RequestResponseMessage::Request {
-                        request_id,
-                        request,
-                        channel,
-                    } => {
-                        // debug!("request_response: Received request {:?} ", request.clone());
-                        self.response_channels_for_inbound_requests
-                            .insert(request_id, channel);
-                        emit_event(
-                            &self.network_event_sender,
-                            NetworkEvent::DseMessageRequestRecv {
-                                sender_peer_id: peer,
+            SwarmEvent::Behaviour(BehaviourEvent::Exchange(event)) => {
+                match event {
+                    RequestResponseEvent::Message { peer, message } => {
+                        match message {
+                            RequestResponseMessage::Request {
                                 request_id,
                                 request,
-                            },
-                        )
-                        .await;
-                    }
-                    RequestResponseMessage::Response {
-                        request_id,
-                        response,
-                    } => {
-                        // debug!(
-                        //     "request_response: Received response {:?} ",
-                        //     response.clone()
-                        // );
-                        if let Some(sender) = self
-                            .pending_dse_outbound_message_requests
-                            .remove(&request_id)
-                        {
-                            sender.send(Ok(response));
-                        } else {
-                            error!("(Outbound message request) response channel missing for request id {}", request_id);
+                                channel,
+                            } => {
+                                // debug!("request_response: Received request {:?} ", request.clone());
+                                self.exchange_inbound_response_channels
+                                    .insert((peer, request_id), channel);
+                                emit_event(
+                                    &self.network_event_sender,
+                                    NetworkEvent::ExchangeRequest {
+                                        sender_peer_id: peer,
+                                        request_id,
+                                        request,
+                                    },
+                                )
+                                .await;
+                            }
+                            RequestResponseMessage::Response {
+                                request_id,
+                                response,
+                            } => {
+                                // debug!(
+                                //     "request_response: Received response {:?} ",
+                                //     response.clone()
+                                // );
+                                if let Some(sender) = self
+                                    .pending_exchange_outbound_requests
+                                    .remove(&(peer, request_id))
+                                {
+                                    sender.send(Ok(response));
+                                } else {
+                                    error!(
+                                        "(exchange) response channel missing for request id {}",
+                                        request_id
+                                    );
+                                }
+                            }
                         }
                     }
-                }
+                    RequestResponseEvent::ResponseSent { peer, request_id } => {
+                        if let Some(sender) = self
+                            .pending_exchange_inbound_response
+                            .remove(&(peer, request_id))
+                        {
+                            sender.send(Ok(()));
+                        } else {
+                            error!(
+                                "(exchange) response channel missing for request id {}",
+                                request_id
+                            );
+                        }
+                    }
+                    RequestResponseEvent::OutboundFailure {
+                        peer,
+                        request_id,
+                        error,
+                    } => {
+                        if let Some(sender) = self
+                            .pending_exchange_outbound_requests
+                            .remove(&(peer, request_id))
+                        {
+                            sender.send(Err(error.into()));
+                        } else {
+                            error!(
+                                "(exchange) response channel missing for request id {}",
+                                request_id
+                            );
+                        }
+                    }
+                    RequestResponseEvent::InboundFailure {
+                        peer,
+                        request_id,
+                        error,
+                    } => {
+                        if let Some(sender) = self
+                            .pending_exchange_inbound_response
+                            .remove(&(peer, request_id))
+                        {
+                            sender.send(Err(error.into()));
+                        } else {
+                            error!(
+                                "(exchange) response channel missing for request id {}",
+                                request_id
+                            );
+                        }
+                    }
+                };
             }
-            SwarmEvent::Behaviour(BehaviourEvent::RequestResponse(
-                RequestResponseEvent::ResponseSent { peer, request_id },
-            )) => {
-                if let Some(sender) = self
-                    .pending_dse_inbound_message_response
-                    .remove(&request_id)
-                {
-                    sender.send(Ok(()));
-                } else {
-                    error!(
-                        "(Inbound message response) response channel missing for request id {}",
-                        request_id
-                    );
-                }
+            SwarmEvent::Behaviour(BehaviourEvent::Commit(event)) => {
+                match event {
+                    RequestResponseEvent::Message { peer, message } => {
+                        match message {
+                            RequestResponseMessage::Request {
+                                request_id,
+                                request,
+                                channel,
+                            } => {
+                                // debug!("request_response: Received request {:?} ", request.clone());
+                                self.commit_inbound_response_channels
+                                    .insert((peer, request_id), channel);
+                                emit_event(
+                                    &self.network_event_sender,
+                                    NetworkEvent::CommitRequest {
+                                        sender_peer_id: peer,
+                                        request_id,
+                                        request,
+                                    },
+                                )
+                                .await;
+                            }
+                            RequestResponseMessage::Response {
+                                request_id,
+                                response,
+                            } => {
+                                // debug!(
+                                //     "request_response: Received response {:?} ",
+                                //     response.clone()
+                                // );
+                                if let Some(sender) = self
+                                    .pending_commit_outbound_requests
+                                    .remove(&(peer, request_id))
+                                {
+                                    sender.send(Ok(response));
+                                } else {
+                                    error!(
+                                        "(commit) response channel missing for request id {}",
+                                        request_id
+                                    );
+                                }
+                            }
+                        }
+                    }
+                    RequestResponseEvent::ResponseSent { peer, request_id } => {
+                        if let Some(sender) = self
+                            .pending_commit_inbound_response
+                            .remove(&(peer, request_id))
+                        {
+                            sender.send(Ok(()));
+                        } else {
+                            error!(
+                                "(commit) response channel missing for request id {}",
+                                request_id
+                            );
+                        }
+                    }
+                    RequestResponseEvent::OutboundFailure {
+                        peer,
+                        request_id,
+                        error,
+                    } => {
+                        if let Some(sender) = self
+                            .pending_commit_outbound_requests
+                            .remove(&(peer, request_id))
+                        {
+                            sender.send(Err(error.into()));
+                        } else {
+                            error!(
+                                "(commit) response channel missing for request id {}",
+                                request_id
+                            );
+                        }
+                    }
+                    RequestResponseEvent::InboundFailure {
+                        peer,
+                        request_id,
+                        error,
+                    } => {
+                        if let Some(sender) = self
+                            .pending_commit_inbound_response
+                            .remove(&(peer, request_id))
+                        {
+                            sender.send(Err(error.into()));
+                        } else {
+                            error!(
+                                "(commit) response channel missing for request id {}",
+                                request_id
+                            );
+                        }
+                    }
+                };
             }
-            SwarmEvent::Behaviour(BehaviourEvent::RequestResponse(
-                RequestResponseEvent::OutboundFailure {
-                    peer,
-                    request_id,
-                    error,
-                },
-            )) => {
-                if let Some(sender) = self
-                    .pending_dse_outbound_message_requests
-                    .remove(&request_id)
-                {
-                    sender.send(Err(error.into()));
-                } else {
-                    error!(
-                        "(Outbound message request) response channel missing for request id {}",
-                        request_id
-                    );
-                }
-            }
-            SwarmEvent::Behaviour(BehaviourEvent::RequestResponse(
-                RequestResponseEvent::InboundFailure {
-                    peer,
-                    request_id,
-                    error,
-                },
-            )) => {
-                if let Some(sender) = self
-                    .pending_dse_inbound_message_response
-                    .remove(&request_id)
-                {
-                    sender.send(Err(error.into()));
-                } else {
-                    error!(
-                        "(Inbound message response) response channel missing for request id {}",
-                        request_id
-                    );
-                }
-            }
+
             SwarmEvent::IncomingConnection {
                 local_addr,
                 send_back_addr,
             } => {
                 debug!(
-                    "swarm: incoming connection {:?} {:?} ",
+                    "(swarm) incoming connection {:?} {:?} ",
                     local_addr, send_back_addr
                 );
             }
@@ -771,7 +931,7 @@ impl Network {
                 ..
             } => {
                 debug!(
-                    "swarm: connection established {:?} {:?} {:?} ",
+                    "(swarm) connection established {:?} {:?} {:?} ",
                     peer_id, endpoint, num_established
                 );
                 match endpoint {
@@ -800,7 +960,7 @@ impl Network {
                 cause,
             } => {
                 debug!(
-                    "swarm: connection closed {:?} {:?} {:?} {:?} ",
+                    "(swarm) connection closed {:?} {:?} {:?} {:?} ",
                     peer_id, endpoint, num_established, cause
                 );
             }
@@ -809,7 +969,7 @@ impl Network {
                 address,
             } => {
                 debug!(
-                    "swarm: new listener id {:?} and addr {:?} ",
+                    "(swarm) new listener id {:?} and addr {:?} ",
                     listener_id, address
                 );
                 self.node_address = Some(address);
@@ -874,15 +1034,27 @@ pub enum Command {
         message: GossipsubMessage,
         sender: oneshot::Sender<Result<gossipsub::MessageId, anyhow::Error>>,
     },
-    SendDseMessageResponse {
-        request_id: request_response::RequestId,
-        response: DseMessageResponse,
+    SendExchangeResponse {
+        peer_id: PeerId,
+        request_id: RequestId,
+        response: ExchangeResponse,
         sender: oneshot::Sender<Result<(), anyhow::Error>>,
     },
-    SendDseMessageRequest {
+    SendExchangeRequest {
         peer_id: PeerId,
-        message: DseMessageRequest,
-        sender: oneshot::Sender<Result<DseMessageResponse, anyhow::Error>>,
+        request: ExchangeRequest,
+        sender: oneshot::Sender<Result<ExchangeResponse, anyhow::Error>>,
+    },
+    SendCommitResponse {
+        peer_id: PeerId,
+        request_id: RequestId,
+        response: CommitResponse,
+        sender: oneshot::Sender<Result<(), anyhow::Error>>,
+    },
+    SendCommitRequest {
+        peer_id: PeerId,
+        request: CommitRequest,
+        sender: oneshot::Sender<Result<CommitResponse, anyhow::Error>>,
     },
     NetworkDetails {
         sender: oneshot::Sender<Result<(PeerId, Multiaddr), anyhow::Error>>,
@@ -895,10 +1067,15 @@ pub enum Command {
 #[derive(Debug, Clone)]
 pub enum NetworkEvent {
     GossipsubMessageRecv(GossipsubMessage),
-    DseMessageRequestRecv {
+    ExchangeRequest {
         sender_peer_id: PeerId,
-        request_id: request_response::RequestId,
-        request: DseMessageRequest,
+        request_id: RequestId,
+        request: ExchangeRequest,
+    },
+    CommitRequest {
+        sender_peer_id: PeerId,
+        request_id: RequestId,
+        request: CommitRequest,
     },
     NewListenAddr {
         listener_id: ListenerId,
@@ -954,170 +1131,6 @@ impl GossipsubTopic {
     fn from_message(message: &GossipsubMessage) -> Self {
         match message {
             GossipsubMessage::NewQuery { .. } => GossipsubTopic::Query,
-        }
-    }
-}
-
-#[derive(Deserialize, Serialize, Debug, Clone, PartialEq)]
-pub enum CommitHistoryRequest {
-    WantHistory {
-        wallet_address: ethers::types::Address,
-    },
-    Update {
-        wallet_address: ethers::types::Address,
-        commits: Vec<storage::Commit>,
-        last_batch: bool,
-    },
-}
-
-// All stuff related to request response
-#[derive(Deserialize, Serialize, Debug, Clone, PartialEq)]
-pub enum DseMessageRequest {
-    /// Provider places bid for a query
-    /// to the Requester
-    PlaceBid {
-        query_id: storage::QueryId,
-        bid: storage::Bid,
-    },
-    /// Requester sends bid acceptance to
-    /// Provider along with wallet address.
-    AcceptBid { query_id: storage::QueryId },
-    /// Provider sends start commit procedure
-    /// to Requester along with wallet address.
-    StartCommit { query_id: storage::QueryId },
-    /// Requester sends T1 commitment to Provider
-    ///
-    /// This request acknowledges that requester's
-    /// wallet address is suitable for exchange
-    T1RequesterCommit {
-        query_id: storage::QueryId,
-        commit: storage::Commit,
-    },
-    /// Provider sends T1 commitment to Requester
-    ///
-    /// This request acknowledges that Requester's T1
-    /// commitment is valid
-    T1ProviderCommit {
-        query_id: storage::QueryId,
-        commit: storage::Commit,
-    },
-    /// Requester sends T2 commitment to Provider
-    ///
-    /// This request acknowledges that Provider's T1
-    /// commitment is valid
-    T2RequesterCommit {
-        query_id: storage::QueryId,
-        commit: storage::Commit,
-    },
-    /// Provider sends acknowledgement to Requester
-    /// that T2 commit is valid
-    T2CommitValid { query_id: storage::QueryId },
-    /// Provider sends response (i.e. provides service)
-    /// to the reqester
-    Service { query_id: storage::QueryId },
-    /// Requester sends invaldating signature for commits
-    /// to the Provider
-    InvalidatingSignature {
-        query_id: storage::QueryId,
-        invalidating_signature: ethers::types::Signature,
-    },
-
-    /// Load Commit History Reqests
-    ///
-    /// FIXME: Sometime later implement different RR
-    /// protocols for DSE requests and LoadCommit requests
-    CommitHistory(CommitHistoryRequest),
-}
-
-#[derive(Deserialize, Serialize, Debug, Clone, PartialEq)]
-pub enum DseMessageResponse {
-    /// Acknowledges the request
-    Ack,
-    /// Bad request
-    Bad,
-}
-
-#[derive(Debug, Clone)]
-pub struct DseMessageProtocol();
-
-impl request_response::ProtocolName for DseMessageProtocol {
-    fn protocol_name(&self) -> &[u8] {
-        b"/dse-message/1"
-    }
-}
-
-#[derive(Clone)]
-struct DseMessageCodec();
-
-#[async_trait]
-impl RequestResponseCodec for DseMessageCodec {
-    type Protocol = DseMessageProtocol;
-    type Request = DseMessageRequest;
-    type Response = DseMessageResponse;
-
-    async fn read_request<T>(
-        &mut self,
-        protocol: &Self::Protocol,
-        io: &mut T,
-    ) -> io::Result<Self::Request>
-    where
-        T: AsyncRead + Unpin + Send,
-    {
-        let vec = read_length_prefixed(io, 1000000).await?;
-        match serde_json::from_slice(&vec) {
-            Ok(v) => Ok(v),
-            Err(e) => Err(io::ErrorKind::Other.into()),
-        }
-    }
-
-    async fn read_response<T>(
-        &mut self,
-        _: &Self::Protocol,
-        io: &mut T,
-    ) -> io::Result<Self::Response>
-    where
-        T: AsyncRead + Unpin + Send,
-    {
-        let vec = read_length_prefixed(io, 1000000).await?;
-        match serde_json::from_slice(&vec) {
-            Ok(v) => Ok(v),
-            Err(_) => Err(io::ErrorKind::Other.into()),
-        }
-    }
-
-    async fn write_request<T>(
-        &mut self,
-        _: &Self::Protocol,
-        io: &mut T,
-        req: Self::Request,
-    ) -> io::Result<()>
-    where
-        T: AsyncWrite + Unpin + Send,
-    {
-        match serde_json::to_vec(&req) {
-            Ok(val) => {
-                write_length_prefixed(io, &val).await?;
-                Ok(())
-            }
-            Err(_) => Err(io::ErrorKind::Other.into()),
-        }
-    }
-
-    async fn write_response<T>(
-        &mut self,
-        protocol: &Self::Protocol,
-        io: &mut T,
-        res: Self::Response,
-    ) -> io::Result<()>
-    where
-        T: AsyncWrite + Unpin + Send,
-    {
-        match serde_json::to_vec(&res) {
-            Ok(val) => {
-                write_length_prefixed(io, &val).await?;
-                Ok(())
-            }
-            Err(_) => Err(io::ErrorKind::Other.into()),
         }
     }
 }

@@ -39,9 +39,9 @@ impl LoadingState {
 }
 
 pub struct ChRequest {
-    network_client: network_client::Client,
-    storage: Arc<storage::Storage>,
-    ethnode: EthNode,
+    pub network_client: network_client::Client,
+    pub storage: Arc<storage::Storage>,
+    pub ethnode: EthNode,
 }
 
 impl ChRequest {

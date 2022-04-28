@@ -48,7 +48,7 @@ impl CommitProcedure {
         let owner_address = self.ethnode.owner_address(&commit.wallet_address).await;
 
         // Verify that the commit is valid for the trade.
-        if !commit.is_commit_valid(&self.trade, &owner_address) {
+        if !commit.is_commit_valid(&self.trade, &owner_address, &self.ethnode.self_address()) {
             // TODO: Behaviour when a invalid commit
             // received is still unknown.
             // I suggest that we cancel the entire trade,
@@ -94,12 +94,6 @@ impl CommitProcedure {
 
         // Update trade status suitable send status
         self.update_trade_send_status();
-
-        // // Perform commit procedure
-        // // Simulates verification
-        // let mut interval = time::interval(time::Duration::from_secs(10));
-        // interval.tick().await;
-        // interval.tick().await;
     }
 
     /// Used for sending commits to peer for a trade  

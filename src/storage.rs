@@ -31,15 +31,14 @@ pub struct CommitHistory {
 }
 
 impl CommitHistory {
-    pub fn update_invalditing_signature(&mut self, id: u32, invalidating_signature: Signature) {
-        // TODO: Check that signature is valid for the given id
-
-        // TODO: Iterate thru all commits and add invalidating signature
-        // to commits corresponding to the given ID.
-
+    pub fn update_invalditing_signature(&mut self, id: &u32, invalidating_signature: &Signature) {
         for c in self.commits.iter_mut() {
-            if c.u == id {
-                c.invalidating_signature = Some(invalidating_signature);
+            if c.u == *id {
+                // TODO:
+                // Check that invalidating signature holds for the i_address
+                // in the commit.
+
+                c.invalidating_signature = Some(invalidating_signature.to_owned());
             }
         }
     }
@@ -48,7 +47,7 @@ impl CommitHistory {
         self.commits.iter().find(|c| {
             if c.c_type == CommitType::T1 && c.invalidating_signature != None {
                 // c_type T1 is invalidated with
-                // invalidating_signature
+                // invalidating_signature.
                 // Note that invalidating signature is validated
                 // before being added, so no need to validate it here
                 // again.
@@ -243,9 +242,9 @@ impl Trade {
 
     pub fn counter_party_details(&self) -> (PeerId, Multiaddr) {
         if self.is_requester {
-            (self.provider_id, self.provider_addr)
+            (self.provider_id.clone(), self.provider_addr.clone())
         } else {
-            (self.requester_id, self.requester_addr)
+            (self.requester_id.clone(), self.requester_addr.clone())
         }
     }
 
@@ -301,7 +300,7 @@ pub struct Commit {
     /// epoch during which the commitment is valid
     pub epoch: U256,
     /// unique id that identifies commitment with the
-    /// corresponding query id
+    /// corresponding trade id
     pub u: u32,
     /// commit type 1 or 2
     pub c_type: CommitType,
@@ -323,8 +322,9 @@ pub struct Commit {
 impl Commit {
     pub fn commit_hash(&self) -> H256 {
         let mut blob: [u8; 160] = [0; 160];
-        U256::from(self.index).to_little_endian(&mut blob[32..64]);
-        U256::from(self.epoch).to_little_endian(&mut blob[64..96]);
+        // FIXME: correct this
+        // U256::from(self.index).to_little_endian(&mut blob[32..64]);
+        self.epoch.to_little_endian(&mut blob[64..96]);
         U256::from(self.u).to_little_endian(&mut blob[96..128]);
         U256::from(self.c_type.clone() as u32).to_little_endian(&mut blob[128..160]);
 
@@ -354,7 +354,12 @@ impl Commit {
     /// > **Note**
     /// > Call this before transitioning from SOMETHING
     /// > Waiting to SOMETHING Processing
-    pub fn is_commit_valid(&self, trade: &Trade, owner_address: &Address) -> bool {
+    pub fn is_commit_valid(
+        &self,
+        trade: &Trade,
+        owner_address: &Address,
+        self_adddress: &Address,
+    ) -> bool {
         // 2 consecutive values define 1 index range,
         // thus indexes can only be in increasing order.
         for i in 1..self.indexes.len() {
@@ -363,10 +368,22 @@ impl Commit {
             }
         }
 
+        // Check u == trade.id
+        if self.u != trade.id {
+            return false;
+        }
+
         // Check signature
         if self
             .signing_address()
             .map_or_else(|| true, |a| a != *owner_address)
+        {
+            return false;
+        }
+
+        // Check i_address == requester owner address
+        if (trade.is_requester && self.i_address != *self_adddress)
+            || (!trade.is_requester && self.i_address != *owner_address)
         {
             return false;
         }
@@ -381,17 +398,9 @@ impl Commit {
     }
 }
 
-#[derive(Deserialize, Serialize)]
-struct WalletsOfInterest {
+#[derive(Deserialize, Serialize, Default)]
+pub struct WalletsOfInterest {
     wallets: HashSet<Address>,
-}
-
-impl Default for WalletsOfInterest {
-    fn default() -> Self {
-        Self {
-            wallets: Default::default(),
-        }
-    }
 }
 
 impl WalletsOfInterest {
@@ -437,9 +446,9 @@ pub struct Storage {
 
 #[derive(Deserialize, Serialize, Debug, Clone, PartialEq)]
 pub struct IWant {
-    requester_id: PeerId,
-    requester_addr: Multiaddr,
-    id: u32,
+    pub requester_id: PeerId,
+    pub requester_addr: Multiaddr,
+    pub id: u32,
 }
 
 impl Storage {
@@ -474,12 +483,11 @@ impl Storage {
 
     // Adds a wallet of interest
     pub fn add_wallet_of_interest(&self, wallet_address: &Address) {
-        let prev = self.get_wallets_of_interest();
+        let mut prev = self.get_wallets_of_interest();
         prev.add(wallet_address);
 
-        let mut db = self.db.lock().unwrap();
-        let tree = db
-            .open_tree(ACTIVE_TRADES)
+        let db = self.db.lock().unwrap();
+        db.open_tree(ACTIVE_TRADES)
             .expect("db: failed to open tree")
             .insert(WALLETS_OF_INTEREST, bincode::serialize(&prev).unwrap());
     }
@@ -487,7 +495,7 @@ impl Storage {
     /// Adds newly received bid to query's
     /// bid tree
     pub fn add_bid_received_for_query(&self, query_id: &QueryId, bid: Bid) {
-        let mut db = self.db.lock().unwrap();
+        let db = self.db.lock().unwrap();
 
         let bids = db
             .open_tree([BIDS_RECEIVED, &query_id.to_be_bytes()].concat())
@@ -564,7 +572,36 @@ impl Storage {
         existing_h.add_new_commits(commits);
 
         let mut db = self.db.lock().unwrap();
-        let commit_history = db
+        db.open_tree(COMMIT_HISTORY)
+            .expect("db: failed to open tree")
+            .insert(
+                wallet_address.as_bytes(),
+                bincode::serialize(&existing_h).unwrap(),
+            );
+    }
+
+    /// Adds invalidating signature to wallet's commit history
+    pub fn update_commit_history_with_invalidating_signature(
+        &self,
+        trade_id: &u32,
+        wallet_address: &Address,
+        invalidating_signature: &Signature,
+    ) {
+        let mut existing_h = {
+            if let Some(h) = self.find_commit_history(wallet_address) {
+                h
+            } else {
+                CommitHistory {
+                    wallet_address: *wallet_address,
+                    commits: Default::default(),
+                }
+            }
+        };
+
+        existing_h.update_invalditing_signature(trade_id, invalidating_signature);
+
+        let db = self.db.lock().unwrap();
+        _ = db
             .open_tree(COMMIT_HISTORY)
             .expect("db: failed to open tree")
             .insert(
@@ -650,7 +687,7 @@ impl Storage {
             .expect("db: failed to open tree")
             .iter()
             .find(|res| {
-                if let Ok(flag) = res.map(|(id, val)| id == WALLETS_OF_INTEREST) {
+                if let Ok(flag) = res.to_owned().map(|(id, _)| id == WALLETS_OF_INTEREST) {
                     flag
                 } else {
                     false
@@ -668,8 +705,8 @@ impl Storage {
         db.open_tree(COMMIT_HISTORY)
             .expect("db: failed to open tree")
             .iter()
-            .find(|val| {
-                if let Ok(Ok(flag)) = val.map(|(_, cm)| {
+            .find(|res| {
+                if let Ok(Ok(flag)) = res.to_owned().map(|(_, cm)| {
                     bincode::deserialize::<CommitHistory>(&cm)
                         .map(|cm| cm.wallet_address == *wallet_address)
                 }) {
@@ -678,7 +715,7 @@ impl Storage {
                     false
                 }
             })
-            .and_then(|val| Some(bincode::deserialize::<CommitHistory>(&val.unwrap().1).unwrap()))
+            .map(|val| bincode::deserialize::<CommitHistory>(&val.unwrap().1).unwrap())
     }
 
     /// Find all bids received for a query by query id

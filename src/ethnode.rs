@@ -10,8 +10,8 @@ abigen!(
 
 #[derive(Clone)]
 pub struct EthNode {
-    client: Arc<Provider<Http>>,
-    wallet: LocalWallet,
+    pub client: Arc<Provider<Http>>,
+    pub wallet: LocalWallet,
     pub timelocked_wallet: types::Address,
 }
 
@@ -55,8 +55,8 @@ impl EthNode {
         U256::default()
     }
 
-    pub fn signer_address(&self) -> Address {
-        Address::zero()
+    pub fn self_address(&self) -> Address {
+        self.wallet.address()
     }
 
     pub async fn owner_address(&self, wallet_address: &Address) -> Address {

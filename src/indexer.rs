@@ -8,7 +8,7 @@ use crate::network::{
     NetworkEvent,
 };
 use libp2p::{identity::Keypair, request_response::RequestId, PeerId};
-use log::{debug, error, info};
+use log::debug;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use tokio::sync::{broadcast, mpsc};
@@ -130,6 +130,60 @@ impl Indexer {
                 self.storage.add_query_received(query);
                 // TODO inform client over WSS
             }
+            NetworkEvent::GossipsubMessageRecv(GossipsubMessage::Commit { commit, trade_id }) => {
+                debug!(
+                    "Received new commit for wallet address {} for trade id {}",
+                    commit.wallet_address, trade_id
+                );
+
+                if self
+                    .storage
+                    .get_wallets_of_interest()
+                    .exists(&commit.wallet_address)
+                {
+                    // TODO: Check that commit is valid
+
+                    // Add commit to commit history
+                    self.storage.add_commits_to_commit_history(
+                        &commit.wallet_address,
+                        vec![commit.clone()],
+                    );
+                }
+            }
+            NetworkEvent::GossipsubMessageRecv(GossipsubMessage::InvalidatingSignature {
+                provider_wallet,
+                requester_wallet,
+                invalidating_signature,
+                trade_id,
+            }) => {
+                debug!("Received invalidating signature for trade id {}", trade_id);
+
+                if self
+                    .storage
+                    .get_wallets_of_interest()
+                    .exists(&provider_wallet)
+                {
+                    self.storage
+                        .update_commit_history_with_invalidating_signature(
+                            &trade_id,
+                            &provider_wallet,
+                            &invalidating_signature,
+                        )
+                }
+
+                if self
+                    .storage
+                    .get_wallets_of_interest()
+                    .exists(&requester_wallet)
+                {
+                    self.storage
+                        .update_commit_history_with_invalidating_signature(
+                            &trade_id,
+                            &requester_wallet,
+                            &invalidating_signature,
+                        )
+                }
+            }
             NetworkEvent::ExchangeRequest {
                 sender_peer_id,
                 request_id,
@@ -242,9 +296,13 @@ impl Indexer {
                             ExchangeResponse::Ack,
                         );
                     }
-                    ExchangeRequest::StartCommit { trade } => {
+                    ExchangeRequest::StartCommit { mut trade } => {
                         // TODO: validate received trade from provider
+
+                        // Update status to RSendT1Commit
+                        trade.update_status(storage::TradeStatus::RSendT1Commit);
                         _ = self.storage.add_active_trade(&trade);
+
                         // TODO send over WSS
                         send_exchange_response(
                             sender_peer_id,
@@ -436,54 +494,44 @@ impl Indexer {
             NetworkEvent::CommitRequest {
                 sender_peer_id,
                 request_id,
-                request,
+                request: CommitRequest::WantHistory { wallet_address },
             } => {
-                match request {
-                    CommitRequest::Update {
-                        wallet_address,
-                        commits,
-                        last_batch,
-                    } => {
-                        if let Some(commit_history) =
-                            self.storage.find_commit_history(&wallet_address)
-                        {
-                            // send Ack
-                            send_commit_response(
-                                sender_peer_id,
-                                request_id,
-                                self.network_client.clone(),
-                                CommitResponse::Ack,
-                            );
+                if let Some(commit_history) = self.storage.find_commit_history(&wallet_address) {
+                    // send Ack
+                    send_commit_response(
+                        sender_peer_id,
+                        request_id,
+                        self.network_client.clone(),
+                        CommitResponse::Ack,
+                    );
 
-                            // FIXME: There are lot of things wrong here -
-                            // 1. Divide all commits into groups and send them over
-                            // few requests, so that each request data size is small.
-                            // 2. Don't handle this here. Spwan a new thread with a struct
-                            // to handle sending CommitHistory to a peer.
-                            let nc = self.network_client.clone();
-                            tokio::spawn(async move {
-                                nc.send_commit_request(
-                                    sender_peer_id,
-                                    CommitRequest::Update {
-                                        wallet_address,
-                                        commits: commit_history.commits,
-                                        last_batch: true,
-                                    },
-                                )
-                                .await;
-                            });
-                        } else {
-                            // Commit history does not exists
-                            // send back bad response
-                            send_commit_response(
+                    // FIXME: There are lot of things wrong here -
+                    // 1. Divide all commits into groups and send them over
+                    // few requests, so that each request data size is small.
+                    // 2. Don't handle this here. Spwan a new thread with a struct
+                    // to handle sending CommitHistory to a peer.
+                    let nc = self.network_client.clone();
+                    tokio::spawn(async move {
+                        let _ = nc
+                            .send_commit_request(
                                 sender_peer_id,
-                                request_id,
-                                self.network_client.clone(),
-                                CommitResponse::Bad,
-                            );
-                        }
-                    }
-                    _ => {}
+                                CommitRequest::Update {
+                                    wallet_address,
+                                    commits: commit_history.commits,
+                                    last_batch: true,
+                                },
+                            )
+                            .await;
+                    });
+                } else {
+                    // Commit history does not exists
+                    // send back bad response
+                    send_commit_response(
+                        sender_peer_id,
+                        request_id,
+                        self.network_client.clone(),
+                        CommitResponse::Bad,
+                    );
                 }
             }
             _ => {}

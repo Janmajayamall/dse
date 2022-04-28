@@ -1,6 +1,7 @@
 use super::storage;
 use async_std::prelude::StreamExt;
 use async_trait::async_trait;
+use ethers::types::{Address, Signature};
 use futures::{AsyncRead, AsyncWrite};
 use libp2p::core::connection::ListenerId;
 use libp2p::core::either::EitherError;
@@ -1086,6 +1087,16 @@ pub enum NetworkEvent {
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub enum GossipsubMessage {
     NewQuery(storage::Query),
+    Commit {
+        commit: storage::Commit,
+        trade_id: u32,
+    },
+    InvalidatingSignature {
+        trade_id: u32,
+        provider_wallet: Address,
+        requester_wallet: Address,
+        invalidating_signature: Signature,
+    },
 }
 
 impl TryFrom<gossipsub::GossipsubMessage> for GossipsubMessage {
@@ -1119,18 +1130,26 @@ impl GossipsubMessage {
 #[derive(Debug)]
 pub enum GossipsubTopic {
     Query,
+    Commit,
+    InvalidatingSignature,
 }
 
 impl GossipsubTopic {
     fn ident_topic(self) -> gossipsub::IdentTopic {
         match self {
             GossipsubTopic::Query => gossipsub::IdentTopic::new("Query"),
+            GossipsubTopic::Commit => gossipsub::IdentTopic::new("Commit"),
+            GossipsubTopic::InvalidatingSignature => {
+                gossipsub::IdentTopic::new("InvalidatingSignature")
+            }
         }
     }
 
     fn from_message(message: &GossipsubMessage) -> Self {
         match message {
             GossipsubMessage::NewQuery { .. } => GossipsubTopic::Query,
+            GossipsubMessage::Commit { .. } => GossipsubTopic::Commit,
+            GossipsubMessage::InvalidatingSignature { .. } => GossipsubTopic::InvalidatingSignature,
         }
     }
 }
